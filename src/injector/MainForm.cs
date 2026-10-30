@@ -3,9 +3,11 @@ using System.Diagnostics;
 namespace GameSpeed;
 
 /// <summary>
-/// Hearthstone-only window: waits for the game, attaches the Unity module as
-/// soon as the game's scripting runtime is up, and switches between presets.
-/// Speed-up always applies only while actions play out (see gsunity.c).
+/// The program's window. One tab drives the speed: it waits for the game,
+/// attaches the Unity module as soon as the game's scripting runtime is up,
+/// and switches between presets (speed-up always applies only while actions
+/// play out, see gsunity.c). The other tab is the Battlegrounds overlay,
+/// which the same module feeds with the rating.
 /// </summary>
 public sealed class MainForm : Form
 {
@@ -31,7 +33,7 @@ public sealed class MainForm : Form
         Text = "Hearthstone SpeedUp";
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(340, 270);
+        ClientSize = new Size(500, 640);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9f);
 
@@ -47,6 +49,15 @@ public sealed class MainForm : Form
 
     private void BuildLayout()
     {
+        var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new Point(12, 6) };
+        var speedTab = new TabPage("Скорость");
+        var baconTab = new TabPage("Поля сражений");
+        var bacon = new BgOverlay.BattlegroundsPanel { Dock = DockStyle.Fill };
+        baconTab.Controls.Add(bacon);
+        tabs.TabPages.Add(speedTab);
+        tabs.TabPages.Add(baconTab);
+        Controls.Add(tabs);
+
         var panel = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -54,7 +65,7 @@ public sealed class MainForm : Form
             WrapContents = false,
             Padding = new Padding(12),
         };
-        Controls.Add(panel);
+        speedTab.Controls.Add(panel);
 
         _target.AutoSize = false;
         _target.Size = new Size(310, 22);

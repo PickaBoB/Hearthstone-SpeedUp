@@ -3,6 +3,8 @@ obj/
 dist/
 src/injector/bin/
 src/injector/obj/
+src/bgoverlay/bin/
+src/bgoverlay/obj/
 *.old.dll
 *.pdb
 *.lib

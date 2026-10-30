@@ -21,6 +21,17 @@
     <SelfContained>false</SelfContained>
     <PublishSingleFile>false</PublishSingleFile>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- The Battlegrounds overlay is sized from the game's client rect in
+         physical pixels; a DPI-virtualized window would land scaled and
+         offset. -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!-- The overlay copies its pixels straight into a DIB section. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <!-- One program: the overlay's half of the sources builds into this exe. -->
+  <ItemGroup>
+    <Compile Include="..\bgoverlay\*.cs" Link="Battlegrounds\%(Filename)%(Extension)" />
+  </ItemGroup>
 
 </Project>

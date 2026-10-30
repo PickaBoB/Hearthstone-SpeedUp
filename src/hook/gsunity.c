@@ -287,6 +287,7 @@ static BOOL bind_api(void)
         rt.class_vtable     = (fn_class_vtable)GetProcAddress(rt.module, "mono_class_vtable");
         rt.mono_static_get  = (fn_mono_static_get)GetProcAddress(rt.module, "mono_field_static_get_value");
         rt.object_isinst    = (fn_object_isinst)GetProcAddress(rt.module, "mono_object_isinst");
+        rt.object_get_class = (fn_object_get_class)GetProcAddress(rt.module, "mono_object_get_class");
     } else {
         rt.domain_get_assemblies = (fn_domain_get_assemblies)GetProcAddress(rt.module, "il2cpp_domain_get_assemblies");
         rt.il2cpp_static_get = (fn_il2cpp_static_get)GetProcAddress(rt.module, "il2cpp_field_static_get_value");
@@ -558,6 +559,141 @@ static BOOL call_get_float(void *method, float *out)
 }
 
 /* ------------------------------------------------------------------ */
+/* Battlegrounds rating                                                */
+/* ------------------------------------------------------------------ */
+
+/* The rating is nowhere in the logs, but the client keeps it with the rest
+ * of its account data: NetCache.Get().m_netCache is Blizzard's own Map, and
+ * its valueSlots array holds one object per kind of cached data. The one of
+ * class NetCache/NetCacheBaconRatingInfo carries both ratings in the backing
+ * fields of its properties. Everything here is a plain read off the managed
+ * heap; the only call is NetCache.Get(), once.
+ *
+ * The numbers go into a section of their own, Local\BgOverlayRating_<pid>,
+ * so the overlay can pick them up without the two builds having to agree on
+ * the layout of the control block. */
+
+#define BACON_MAGIC 0x54524742u   /* "BGRT" */
+
+#pragma pack(push, 1)
+typedef struct {
+    UINT32 magic;
+    UINT32 version;
+    INT32  solo;
+    INT32  duo;
+    UINT32 seq;       /* bumped on every change, so a reader sees movement */
+} BaconShared;
+#pragma pack(pop)
+
+static BaconShared *g_bacon;
+static HANDLE       g_bacon_handle;
+
+static struct {
+    BOOL  ready;
+    void *netcache;            /* the NetCache singleton */
+    void *f_netcache;          /* NetCache.m_netCache, a Map<Type, object> */
+    void *rating_class;
+    void *f_solo, *f_duo;
+} bacon;
+
+static void open_bacon_shared(void)
+{
+    WCHAR name[64];
+
+    wsprintfW(name, L"Local\\BgOverlayRating_%lu", GetCurrentProcessId());
+    g_bacon_handle = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                        0, sizeof(BaconShared), name);
+    if (!g_bacon_handle) return;
+    g_bacon = (BaconShared*)MapViewOfFile(g_bacon_handle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(BaconShared));
+    if (!g_bacon) return;
+    g_bacon->magic   = BACON_MAGIC;
+    g_bacon->version = 1;
+}
+
+/* A managed array's elements. MonoArray is MonoObject (vtable, sync) then
+ * bounds and length, with the elements inline after them. */
+static void **array_items(void *array, size_t *count)
+{
+    char  *p = (char*)array;
+    size_t word = sizeof(void*), len;
+
+    *count = 0;
+    if (!array) return NULL;
+    len = *(size_t*)(p + 3 * word);
+    if (len > 4096) return NULL;      /* not an array, or not one we know */
+    *count = len;
+    return (void**)(p + 4 * word);
+}
+
+static BOOL bacon_bind(void)
+{
+    void *netcache_class, *get, *exc = NULL;
+
+    if (bacon.ready) return TRUE;
+    if (!rt.object_get_class || !rt.object_isinst) return FALSE;
+
+    netcache_class = find_class("", "NetCache");
+    bacon.rating_class = find_class("", "NetCache/NetCacheBaconRatingInfo");
+    if (!bacon.rating_class) bacon.rating_class = find_class("", "NetCacheBaconRatingInfo");
+    if (!netcache_class || !bacon.rating_class) return FALSE;
+
+    get = rt.class_method(netcache_class, "Get", 0);
+    bacon.f_netcache = rt.field_from_name(netcache_class, "m_netCache");
+    bacon.f_solo = rt.field_from_name(bacon.rating_class, "<Rating>k__BackingField");
+    bacon.f_duo  = rt.field_from_name(bacon.rating_class, "<DuosRating>k__BackingField");
+    if (!get || !bacon.f_netcache || !bacon.f_solo) {
+        gsp_log("rating: NetCache found but its members changed "
+                "(get=%p cache=%p solo=%p duo=%p)", get, bacon.f_netcache, bacon.f_solo, bacon.f_duo);
+        return FALSE;
+    }
+
+    bacon.netcache = rt.runtime_invoke(get, NULL, NULL, &exc);
+    if (exc || !bacon.netcache) { gsp_log("rating: NetCache.Get() failed"); return FALSE; }
+
+    gsp_log("rating: NetCache=%p", bacon.netcache);
+    bacon.ready = TRUE;
+    return TRUE;
+}
+
+static BOOL bacon_read(INT32 *solo, INT32 *duo)
+{
+    void  *map = NULL, *values = NULL, *map_class, *f_values;
+    void **items;
+    size_t n, i;
+
+    if (!bacon.ready) return FALSE;
+    rt.field_get_value(bacon.netcache, bacon.f_netcache, &map);
+    if (!map) return FALSE;
+
+    /* valueSlots sits on the map's own instantiated class. */
+    map_class = rt.object_get_class(map);
+    f_values  = map_class ? rt.field_from_name(map_class, "valueSlots") : NULL;
+    if (!f_values) return FALSE;
+    rt.field_get_value(map, f_values, &values);
+
+    items = array_items(values, &n);
+    for (i = 0; i < n; i++) {
+        if (!items[i] || !is_instance_of(items[i], bacon.rating_class)) continue;
+        rt.field_get_value(items[i], bacon.f_solo, solo);
+        if (bacon.f_duo) rt.field_get_value(items[i], bacon.f_duo, duo);
+        return TRUE;
+    }
+    return FALSE;   /* the cache has no rating yet: not signed in, or not fetched */
+}
+
+static void bacon_publish(void)
+{
+    INT32 solo = 0, duo = 0;
+
+    if (!g_bacon || !bacon_read(&solo, &duo)) return;
+    if (g_bacon->solo == solo && g_bacon->duo == duo) return;
+    gsp_log("rating: solo=%d duo=%d", solo, duo);
+    g_bacon->solo = solo;
+    g_bacon->duo  = duo;
+    g_bacon->seq++;
+}
+
+/* ------------------------------------------------------------------ */
 /* Waiting for the engine                                              */
 /* ------------------------------------------------------------------ */
 
@@ -633,13 +769,14 @@ static DWORD WINAPI worker(LPVOID unused)
     UINT32 last_seq = 0xFFFFFFFFu;
     double applied = -1.0;
     int attempts = 0;
-    unsigned long restores = 0, switches = 0, rebind_ticks = 0;
+    unsigned long restores = 0, switches = 0, rebind_ticks = 0, bacon_ticks = 0;
     ULONGLONG last_busy = 0;
     LONG my_gen;
     (void)unused;
 
     gsp_log("--- gsunity worker start ---");
     open_shared();
+    open_bacon_shared();
     gsp_log("shm=%p", (void*)g_shm);
 
     /* The scripting runtime loads after the process starts, and injecting
@@ -711,6 +848,7 @@ static DWORD WINAPI worker(LPVOID unused)
     my_gen = g_shm ? InterlockedIncrement(&g_shm->owner) : 0;
 
     hs_bind();
+    bacon_bind();
 
     if (g_shm) {
         g_shm->backend = rt.backend;
@@ -731,6 +869,12 @@ static DWORD WINAPI worker(LPVOID unused)
 
         /* TimeScaleMgr may come up after the injection, at the main menu. */
         if (!hs.ready && ++rebind_ticks % 50 == 0) hs_bind();
+
+        /* The rating changes once a game, and only between games. */
+        if (++bacon_ticks % 50 == 0) {
+            if (!bacon.ready) bacon_bind();
+            bacon_publish();
+        }
 
         if (hs.ready) {
             double want = g_shm->mult;
