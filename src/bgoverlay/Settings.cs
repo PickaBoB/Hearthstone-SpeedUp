@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 
 namespace BgOverlay;
 
@@ -32,6 +32,19 @@ internal sealed class Settings
     /// <summary>The turn counter in the top right corner of the play area.</summary>
     public bool    TurnEnabled    { get; set; } = true;
     public double  TurnY          { get; set; } = 0.015;
+    /// <summary>The clickable speed buttons in the bottom right corner.</summary>
+    public bool    SpeedButtonsEnabled { get; set; } = true;
+    /// <summary>How far the speed buttons sit from the bottom edge, as a share
+    /// of the game window's height — raised so the strip clears the game's
+    /// own buttons in that corner.</summary>
+    public double  SpeedButtonsY  { get; set; } = 0.10;
+    /// <summary>
+    /// The hotkey of each speed preset, as Win32 modifier flags
+    /// (MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN) and a virtual-key code.
+    /// Defaults: Ctrl+Alt+1..4.
+    /// </summary>
+    public int[]   SpeedHotkeyMods { get; set; } = { 0x0003, 0x0003, 0x0003, 0x0003 };
+    public int[]   SpeedHotkeyKeys { get; set; } = { 0x31, 0x32, 0x33, 0x34 };
     public string? InstallDir     { get; set; }
 
     public static string Dir { get; } = Path.Combine(

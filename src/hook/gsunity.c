@@ -694,6 +694,129 @@ static void bacon_publish(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Battlegrounds lobby names                                           */
+/* ------------------------------------------------------------------ */
+
+/* Power.log names the local player and their teammate, but not the other
+ * opponents. GameState.m_playerInfoMap has the whole lobby. Publish the
+ * player ids and their display names separately from the rating so an older
+ * module without this section can still share the rating. */
+#define LOBBY_NAMES_MAGIC 0x4d4e4742u   /* "BGNM" */
+#define LOBBY_NAMES_MAX   16
+#define LOBBY_NAME_CHARS  64
+
+#pragma pack(push, 1)
+typedef struct {
+    INT32 player_id;
+    WCHAR name[LOBBY_NAME_CHARS];
+} LobbyNameEntry;
+
+typedef struct {
+    UINT32 magic;
+    UINT32 version;
+    LONG   seq;       /* odd while the entries are being replaced */
+    LobbyNameEntry players[LOBBY_NAMES_MAX];
+} LobbyNamesShared;
+#pragma pack(pop)
+
+static LobbyNamesShared *g_lobby_names;
+static HANDLE           g_lobby_names_handle;
+
+static struct {
+    BOOL  ready;
+    void *f_player_infos;
+    void *info_class;
+    void *f_info_name;
+} lobby_names;
+
+static void open_lobby_names_shared(void)
+{
+    WCHAR name[64];
+
+    wsprintfW(name, L"Local\\BgOverlayLobbyNames_%lu", GetCurrentProcessId());
+    g_lobby_names_handle = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                              0, sizeof(LobbyNamesShared), name);
+    if (!g_lobby_names_handle) return;
+    g_lobby_names = (LobbyNamesShared*)MapViewOfFile(g_lobby_names_handle, FILE_MAP_ALL_ACCESS,
+                                                     0, 0, sizeof(LobbyNamesShared));
+    if (!g_lobby_names) return;
+    g_lobby_names->magic   = LOBBY_NAMES_MAGIC;
+    g_lobby_names->version = 1;
+}
+
+static BOOL lobby_names_bind(void)
+{
+    if (lobby_names.ready) return TRUE;
+    if (!hs.gs_class || !hs.f_gs_instance || !rt.object_get_class) return FALSE;
+
+    lobby_names.f_player_infos = rt.field_from_name(hs.gs_class, "m_playerInfoMap");
+    lobby_names.info_class = find_class("", "SharedPlayerInfo");
+    if (lobby_names.info_class)
+        lobby_names.f_info_name = rt.field_from_name(lobby_names.info_class, "m_name");
+    if (!lobby_names.f_player_infos || !lobby_names.f_info_name) return FALSE;
+
+    lobby_names.ready = TRUE;
+    return TRUE;
+}
+
+static void lobby_names_publish(void)
+{
+    LobbyNamesShared next;
+    void *gs = NULL, *map = NULL, *keys_array = NULL, *values_array = NULL;
+    void *map_class, *f_keys, *f_values;
+    INT32 *keys;
+    void **values;
+    size_t nk, nv, i;
+    int count = 0;
+
+    if (!g_lobby_names || !lobby_names.ready) return;
+    if (!read_static(hs.gs_class, hs.f_gs_instance, &gs) || !gs) return;
+    rt.field_get_value(gs, lobby_names.f_player_infos, &map);
+    if (!map) return;
+
+    map_class = rt.object_get_class(map);
+    f_keys   = map_class ? rt.field_from_name(map_class, "keySlots") : NULL;
+    f_values = map_class ? rt.field_from_name(map_class, "valueSlots") : NULL;
+    if (!f_keys || !f_values) return;
+    rt.field_get_value(map, f_keys, &keys_array);
+    rt.field_get_value(map, f_values, &values_array);
+
+    keys   = (INT32*)array_items(keys_array, &nk);
+    values = array_items(values_array, &nv);
+    if (!keys || !values) return;
+
+    memset(&next, 0, sizeof(next));
+    for (i = 0; i < nk && i < nv && count < LOBBY_NAMES_MAX; i++) {
+        void *managed = NULL;
+        INT32 len;
+        char *chars;
+
+        if (keys[i] <= 0 || !is_instance_of(values[i], lobby_names.info_class)) continue;
+        rt.field_get_value(values[i], lobby_names.f_info_name, &managed);
+        if (!managed) continue;
+
+        /* MonoString and Il2CppString both keep length after the two-word
+         * object header, followed by inline UTF-16 characters. */
+        len = *(INT32*)((char*)managed + 2 * sizeof(void*));
+        if (len <= 0 || len > 1024) continue;
+        if (len > LOBBY_NAME_CHARS - 1) len = LOBBY_NAME_CHARS - 1;
+        chars = (char*)managed + 2 * sizeof(void*) + sizeof(INT32);
+
+        next.players[count].player_id = keys[i];
+        memcpy(next.players[count].name, chars, len * sizeof(WCHAR));
+        next.players[count].name[len] = 0;
+        count++;
+    }
+
+    if (memcmp(g_lobby_names->players, next.players, sizeof(next.players)) == 0) return;
+    InterlockedIncrement(&g_lobby_names->seq);
+    memcpy(g_lobby_names->players, next.players, sizeof(next.players));
+    MemoryBarrier();
+    InterlockedIncrement(&g_lobby_names->seq);
+    gsp_log("lobby names: %d players", count);
+}
+
+/* ------------------------------------------------------------------ */
 /* Waiting for the engine                                              */
 /* ------------------------------------------------------------------ */
 
@@ -874,6 +997,9 @@ static DWORD WINAPI worker(LPVOID unused)
         if (++bacon_ticks % 50 == 0) {
             if (!bacon.ready) bacon_bind();
             bacon_publish();
+            if (!g_lobby_names) open_lobby_names_shared();
+            if (!lobby_names.ready) lobby_names_bind();
+            lobby_names_publish();
         }
 
         if (hs.ready) {

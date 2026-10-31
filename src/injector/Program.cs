@@ -3,7 +3,7 @@ namespace GameSpeed;
 internal static class Program
 {
     /// <summary>Arguments that belong to the overlay's own command line.</summary>
-    private static readonly string[] OverlayArgs = { "--replay", "--shot", "--rating" };
+    private static readonly string[] OverlayArgs = { "--replay", "--shot", "--rating", "--sim" };
 
     [STAThread]
     private static int Main(string[] args)

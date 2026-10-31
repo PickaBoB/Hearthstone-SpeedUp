@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Text;
 
 namespace BgOverlay;
@@ -12,14 +12,15 @@ internal sealed class BattlegroundsPanel : UserControl
 {
     private static readonly int[] Percentiles = { 100, 50, 25, 10, 1 };
     private static readonly Color Muted = Color.FromArgb(152, 158, 175);
-    private static readonly Color Dim = Color.FromArgb(104, 110, 128);
 
     private readonly LogReader   _reader = new();
     private readonly StatsStore  _stats = new();
     private readonly History     _history = new();
     private readonly RatingReader _rating = new();
+    private readonly LobbyNamesReader _lobbyNames = new();
     private readonly CardArt     _art = new();
     private readonly OverlayForm _overlay = new();
+    private readonly SpeedStripForm _speedStrip = new();
     private readonly System.Windows.Forms.Timer _tick = new() { Interval = 250 };
     private readonly System.Windows.Forms.Timer _refresh = new() { Interval = 30 * 60 * 1000 };
 
@@ -28,6 +29,7 @@ internal sealed class BattlegroundsPanel : UserControl
     private readonly Label    _statsLabel = new();
     private readonly ComboBox _mmr = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly CheckBox _enabled = new() { Text = "Показывать оверлей поверх игры", AutoSize = true };
+    private readonly CheckBox _speedOn = new() { Text = "Кнопки скорости в игре (справа снизу)", AutoSize = true };
     private readonly ComboBox _preview = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly NumericUpDown _heroY = new();
     private readonly NumericUpDown _trinketY = new();
@@ -37,6 +39,7 @@ internal sealed class BattlegroundsPanel : UserControl
     private readonly CheckBox _peekOn = new() { Text = "Доска по наведению", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly CheckBox _turnOn = new() { Text = "Ход справа сверху", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly NumericUpDown _turnY = new();
+    private readonly NumericUpDown _speedY = new();
     private readonly NumericUpDown _peekTop = new();
     private readonly NumericUpDown _peekSpan = new();
     private readonly NumericUpDown _peekWidth = new();
@@ -56,6 +59,12 @@ internal sealed class BattlegroundsPanel : UserControl
     private bool _statsStarted;
     private readonly string _configNote;
 
+    /// <summary>The speed the main window has in force; the strip lights it.</summary>
+    public double CurrentSpeed { get; set; } = 1.0;
+
+    /// <summary>A speed button over the game was clicked.</summary>
+    public event Action<double>? SpeedPicked;
+
     public BattlegroundsPanel()
     {
         Size = new Size(480, 600);
@@ -63,6 +72,7 @@ internal sealed class BattlegroundsPanel : UserControl
 
         _configNote = SafeEnsureLogging();
         _overlay.Art = _art;
+        _speedStrip.SpeedPicked += v => SpeedPicked?.Invoke(v);
         BuildLayout();
 
         _tick.Tick += (_, _) => Tick();
@@ -129,8 +139,15 @@ internal sealed class BattlegroundsPanel : UserControl
             Settings.Current.Save();
         };
 
-        var layoutBox = new GroupBox { Text = "Положение меток (доля высоты окна игры, %)", Size = new Size(450, 206) };
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 6, Padding = new Padding(4) };
+        _speedOn.Checked = Settings.Current.SpeedButtonsEnabled;
+        _speedOn.CheckedChanged += (_, _) =>
+        {
+            Settings.Current.SpeedButtonsEnabled = _speedOn.Checked;
+            Settings.Current.Save();
+        };
+
+        var layoutBox = new GroupBox { Text = "Положение меток (доля высоты окна игры, %)", Size = new Size(450, 240) };
+        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 7, Padding = new Padding(4) };
         SetupY(_heroY, Settings.Current.HeroBadgeY, v => Settings.Current.HeroBadgeY = v);
         SetupY(_trinketY, Settings.Current.TrinketBadgeY, v => Settings.Current.TrinketBadgeY = v);
         SetupY(_panelY, Settings.Current.PanelY, v => Settings.Current.PanelY = v);
@@ -184,6 +201,9 @@ internal sealed class BattlegroundsPanel : UserControl
         grid.SetColumnSpan(_preview, 2);
         grid.Controls.Add(_turnOn, 0, 5);
         grid.Controls.Add(_turnY, 1, 5);
+        SetupY(_speedY, Settings.Current.SpeedButtonsY, v => Settings.Current.SpeedButtonsY = v);
+        grid.Controls.Add(new Label { Text = "Кнопки скорости: низ", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 6);
+        grid.Controls.Add(_speedY, 1, 6);
         layoutBox.Controls.Add(grid);
 
         _details.Multiline = true;
@@ -198,7 +218,7 @@ internal sealed class BattlegroundsPanel : UserControl
 
         panel.Controls.AddRange(new Control[]
         {
-            _game, _tribes, _statsLabel, statsRow, _enabled, layoutBox, _details, source,
+            _game, _tribes, _statsLabel, statsRow, _enabled, _speedOn, layoutBox, _details, source,
         });
     }
 
@@ -261,6 +281,7 @@ internal sealed class BattlegroundsPanel : UserControl
 
         GameSnapshot snap = _reader.Parser.Snapshot();
         _rating.Poll(_hsProcess);
+        _lobbyNames.Poll(_hsProcess);
         // The rating moves between games, so each game is bracketed by the
         // value before it started and the one that lands after it ends.
         if (snap.InBattlegrounds && !_wasInGame) _ratingBefore = _rating.Of(snap.IsDuo);
@@ -272,15 +293,16 @@ internal sealed class BattlegroundsPanel : UserControl
         UpdateStatus(snap);
 
         IntPtr hs = FindGameWindow();
-        bool show = Settings.Current.OverlayEnabled && hs != IntPtr.Zero
-                 && !Native.IsIconic(hs) && Native.IsWindowVisible(hs);
-        Rectangle client = show ? ClientRect(hs) : Rectangle.Empty;
-        if (show)
+        bool up = hs != IntPtr.Zero && !Native.IsIconic(hs) && Native.IsWindowVisible(hs);
+        Rectangle client = up ? ClientRect(hs) : Rectangle.Empty;
+        bool front = false;
+        if (up)
         {
             IntPtr own = TopLevelControl?.Handle ?? IntPtr.Zero;
             IntPtr fg = Native.GetForegroundWindow();
-            show = fg == hs || (own != IntPtr.Zero && fg == own);
+            front = fg == hs || (own != IntPtr.Zero && fg == own);
         }
+        bool show = Settings.Current.OverlayEnabled && up && front;
         // The list of past games answers the pointer even though the overlay
         // itself never takes it: the cursor's place is all it needs.
         _hoverRow = show && !snap.InBattlegrounds ? HoverRow(client) : -1;
@@ -296,6 +318,10 @@ internal sealed class BattlegroundsPanel : UserControl
         }
 
         _overlay.Present(show && _model is not null ? client : Rectangle.Empty, show ? _model : null);
+        // The speed buttons are not part of the overlay's model: they earn
+        // their corner whenever the game is up, in and out of Battlegrounds.
+        _speedStrip.Present(up && front && Settings.Current.SpeedButtonsEnabled ? client : Rectangle.Empty,
+            CurrentSpeed);
     }
 
     private int HoverRow(Rectangle client)
@@ -365,14 +391,20 @@ internal sealed class BattlegroundsPanel : UserControl
         sb.Append(_preview.SelectedIndex).Append('|').Append(_stats.Version).Append('|')
           .Append(_history.Version).Append('|').Append(_hoverRow).Append('|')
           .Append(_rating.Solo).Append('/').Append(_rating.Duo).Append('|')
+          .Append(_lobbyNames.Version).Append('|')
           .Append(CurrentSession()).Append('|')
           .Append(_art.Version).Append('|').Append(_peekSlot).Append('|')
           .Append(string.Join(",", (s.Seen ?? []).Select(b => $"{b.PlayerId}:{b.Turn}:{b.Stats}"))).Append('|')
+          .Append(string.Join(",", (s.Lobby ?? []).Select(p => p.PlayerName))).Append('|')
           .Append(s.IsDuo).Append('|').Append(s.TribesConfident).Append('|')
           .Append(string.Join(",", s.Tribes)).Append('|');
         sb.Append(s.InBattlegrounds).Append('|').Append(s.MyHeroCardId).Append(s.MyHeroName).Append('|')
           .Append(s.Turn).Append(s.InCombat).Append('|').Append(s.BoardStats).Append('/').Append(s.BoardMinions).Append('|')
           .Append(s.CombatWaiting).Append('|').Append(s.Combat?.Key).Append('|')
+          .Append(s.Combat?.HasExactGuess).Append('|')
+          .Append(s.CombatEnemyTeamOut).Append('|').Append(s.CombatOverall?.Key).Append('|')
+          .Append(s.CombatOverall?.HasExactGuess).Append('|')
+          .Append(string.Join(",", (s.Buffs ?? []).Select(b => $"{b.Kind}:{b.Attack}/{b.Health}"))).Append('|')
           .Append(Settings.Current.PanelEnabled).Append(Settings.Current.TurnEnabled).Append('|');
         if (s.Choice is { } c)
         {
@@ -396,7 +428,8 @@ internal sealed class BattlegroundsPanel : UserControl
         // The hero pick has its own badges and no hero to describe yet.
         var panel = snap.Choice?.Kind == ChoiceKind.Hero ? null : BuildPanel(snap);
         var peekNow = BuildPeek(snap);
-        if (snap.Choice is null) return new OverlayModel(null, [], "", panel, banner, null, peekNow, turn);
+        var buffs = snap.InCombat ? null : snap.Buffs;
+        if (snap.Choice is null) return new OverlayModel(null, [], "", panel, banner, null, peekNow, turn, buffs);
 
         var items = Rating.Rate(snap.Choice, snap, _stats);
         string header;
@@ -411,7 +444,7 @@ internal sealed class BattlegroundsPanel : UserControl
             header = (snap.Choice.Kind == ChoiceKind.LesserTrinket ? "Малый" : "Большой") + " аксессуар";
         }
         header += $" · {MmrCaption()}";
-        return new OverlayModel(snap.Choice.Kind, items, header, panel, banner, null, BuildPeek(snap), turn);
+        return new OverlayModel(snap.Choice.Kind, items, header, panel, banner, null, peekNow, turn, buffs);
     }
 
     private static WinBanner? BuildBanner(GameSnapshot snap)
@@ -421,22 +454,17 @@ internal sealed class BattlegroundsPanel : UserControl
         if (snap.CombatWaiting || snap.Combat is null)
             return new WinBanner(true, "Бой начинается…", "ждём выход карт", null, null, null);
 
-        var g = snap.Combat.Guess();
-        if (g.Waiting) return new WinBanner(true, "Считаю бой…", g.Status, null, null, null);
-        string sub = $"ничья {g.Tie * 100:0}%  ·  поражение {g.Lose * 100:0}%"
-                   + $"  ·  {g.MyStats} против {g.TheirStats}";
+        // In duos the figure that counts the whole fight waits for the
+        // second enemy board to step out: before that the fight's shape is
+        // not all there. In solo the pairing is the fight, shown at once.
+        if (snap.IsDuo && !snap.CombatEnemyTeamOut)
+            return new WinBanner(true, "Бой идёт…", "ждём вторую доску соперника", null, null, null);
 
-        // Duos: what the team is worth once its second board steps in.
-        string team = "";
-        double? teamWin = null;
-        if (snap.Combat.TeamGuess() is { } t)
-        {
-            string seen = snap.Combat.BenchTurn > 0 && snap.Combat.BenchTurn < snap.Turn
-                ? $"  (ход {snap.Combat.BenchTurn})" : "";
-            team = $"с союзником {t.Win * 100:0}%  ·  {t.MyStats} против {t.TheirStats}{seen}";
-            teamWin = t.Win;
-        }
-        return new WinBanner(false, $"{g.Win!.Value * 100:0}%", sub, g.Win, g.Tie, g.Lose, team, teamWin);
+        var g = (snap.CombatOverall ?? snap.Combat).Guess();
+        if (g.Waiting) return new WinBanner(true, "Считаю бой…", g.Status, null, null, null);
+        // "≈" until the full simulator answers; bare figure once it has.
+        string sub = $"{g.MyStats} против {g.TheirStats}" + (g.Exact ? "" : "  ·  ≈");
+        return new WinBanner(false, $"{g.Win!.Value * 100:0}%", sub, g.Win, g.Tie, g.Lose);
     }
 
     private IReadOnlyList<PanelLine> BuildPanel(GameSnapshot snap)
@@ -449,82 +477,46 @@ internal sealed class BattlegroundsPanel : UserControl
             lines.Add(PanelLine.Title(h.Option.Name, h.Tier, OverlayForm.TierColor(h.Tier),
                 snap.MyHeroCardId ?? ""));
             if (h.AvgPlace is double p)
-                lines.Add(PanelLine.Pair(s.LobbyCounted ? "Место с этими расами" : "Среднее место",
-                    $"{p:0.00}", Color.White));
-            if (h.Detail.Length > 0) lines.Add(PanelLine.Note(h.Detail, Muted));
+                lines.Add(PanelLine.Pair("Среднее место", $"{p:0.00}", Color.White));
         }
 
-        lines.Add(PanelLine.Section(snap.Turn > 0
-            ? $"Ход {snap.Turn} · {(snap.InCombat ? "бой" : "таверна")}"
+        lines.Add(PanelLine.Section(snap.BoardMinions > 0
+            ? $"Доска · {Minions(snap.BoardMinions)}"
             : "Доска"));
         if (snap.BoardMinions > 0)
         {
             Color ink = Color.White;
-            double bar = -1;
-            string note = $"{Minions(snap.BoardMinions)} · атака + здоровье";
             if (s?.AvgWarbandThisTurn is double avg && avg > 0)
             {
                 double ratio = snap.BoardStats / avg;
                 ink = ratio >= 1.15 ? OverlayForm.Good : ratio <= 0.85 ? OverlayForm.Bad : Color.White;
-                // Half the meter is the average of this turn, so the mark in
-                // the middle is where an ordinary board of ours would reach.
-                bar = ratio / 2;
-                note = $"{ratio * 100:0}% от средней ({avg:0}) · {Minions(snap.BoardMinions)}";
+                lines.Add(PanelLine.Pair("Ваши статы", $"{snap.BoardStats}", ink));
+                lines.Add(PanelLine.Pair("Средние на ходу", $"{avg:0}", Color.White));
+                double difference = Math.Round((ratio - 1) * 100);
+                string comparison = Math.Abs(difference) < 1 ? "на уровне средней"
+                    : $"на {Math.Abs(difference):0}% {(difference > 0 ? "выше" : "ниже")} средней";
+                lines.Add(PanelLine.Note(comparison, Muted));
             }
-            lines.Add(PanelLine.Pair("Сила доски", $"{snap.BoardStats}", ink, bar));
-            lines.Add(PanelLine.Note(note, Muted));
+            else
+            {
+                lines.Add(PanelLine.Pair("Атака + здоровье", $"{snap.BoardStats}", ink));
+            }
         }
         else
         {
-            lines.Add(PanelLine.Note("доска пуста", Muted));
+            lines.Add(PanelLine.Note("Пока нет существ", Muted));
         }
-        if (s?.CombatWinrateThisTurn is double wr)
-            lines.Add(PanelLine.Pair("Бои героя на ходу", $"{wr:0}%", Color.White));
 
-        AddTribes(lines, snap, s);
-        lines.Add(PanelLine.Note($"Firestone · {MmrCaption()}", Dim));
+        AddTribes(lines, snap);
         return lines;
     }
 
-    /// <summary>
-    /// What the lobby's tribes are worth to this hero: each one with the way
-    /// it moves the hero's average place, strongest first. Below zero the
-    /// hero finishes higher when that tribe is in the game.
-    /// </summary>
-    private static void AddTribes(List<PanelLine> lines, GameSnapshot snap, HeroSummary? s)
+    private static void AddTribes(List<PanelLine> lines, GameSnapshot snap)
     {
-        if (s is not null && s.Lobby.Any(t => t.Impact is not null))
-        {
-            lines.Add(PanelLine.Section("Расы лобби · сдвиг места"));
-            // The strongest tribe of the lobby fills its row; half the tribes
-            // land on 0.03 or less, so the floor keeps those bars honest
-            // without flattening them away.
-            double scale = Math.Max(s.Lobby.Max(t => Math.Abs(t.Impact ?? 0)), 0.08);
-            foreach (LobbyTribe t in s.Lobby)
-            {
-                if (t.Impact is not double v)
-                {
-                    lines.Add(PanelLine.Tribe(Tribes.Name(t.Tribe), "—", Dim));
-                    continue;
-                }
-                double shown = Math.Round(v, 2);
-                bool matters = Math.Abs(shown) >= 0.02;
-                Color ink = !matters ? Muted : shown < 0 ? OverlayForm.Good : OverlayForm.Bad;
-                string value = (shown > 0 ? "+" : shown < 0 ? "−" : "±") + Math.Abs(shown).ToString("0.00");
-                // A tribe that changes nothing gets no bar: only what moves shows.
-                lines.Add(PanelLine.Tribe(Tribes.Name(t.Tribe), value, ink,
-                    matters ? Math.Abs(shown) / scale : -1));
-            }
-            if (!s.LobbyCounted)
-                lines.Add(PanelLine.Note("дуэты: выборка меньше, в среднее место не входит", Dim));
-            return;
-        }
-        if (snap.Tribes.Count == 0) return;
-        lines.Add(PanelLine.Section("Расы лобби"));
-        lines.Add(PanelLine.Note(string.Join(", ", snap.Tribes.Select(Tribes.Name))
-            + (snap.TribesConfident ? "" : " (ещё не все)"), Muted));
-        if (snap.TribesConfident && !snap.IsDuo)
-            lines.Add(PanelLine.Note("по этому герою данных о расах нет", Dim));
+        lines.Add(PanelLine.Section("Расы в лобби"));
+        lines.Add(PanelLine.Note(snap.Tribes.Count > 0
+            ? string.Join(", ", snap.Tribes.Select(Tribes.Name)) + (snap.TribesConfident ? "" : " (пока не все)")
+            : "Пока не определены", Muted));
     }
 
     /// <summary>"7 существ", with the ending the number asks for.</summary>
@@ -551,18 +543,22 @@ internal sealed class BattlegroundsPanel : UserControl
 
         var boards = lobby
             .Where(p => p.Place == place)
-            .Select(p => new PeekBoard(
-                $"{place}. " + p.Hero + (p.Tier > 0 ? $"  ★{p.Tier}" : ""),
-                p.HeroCard,
-                p.Board is { } b
-                    ? $"ход {b.Turn} · {b.Stats} ат.+зд. · {b.Hp} зд."
-                    : "доску ещё не видели",
-                !p.Alive ? Color.FromArgb(132, 138, 155)
-                    : p.Friendly ? OverlayForm.Good : Color.White,
-                p.Board is { } board
-                    ? board.Board.Select(m => new BoardCard(m.CardId, m.Name, $"{m.Attack}/{m.Health}",
-                        Marks(m), MarkInk(m))).ToList()
-                    : Array.Empty<BoardCard>()))
+            .Select(p =>
+            {
+                string? nick = p.PlayerName ?? _lobbyNames.Of(p.PlayerId);
+                return new PeekBoard(
+                    $"{place}. " + (nick ?? p.Hero) + (p.Tier > 0 ? $"  ★{p.Tier}" : ""),
+                    p.HeroCard,
+                    (nick is null ? "" : p.Hero + " · ") + (p.Board is { } b
+                        ? $"ход {b.Turn} · {b.Stats} ат.+зд. · {b.Hp} зд."
+                        : "доску ещё не видели"),
+                    !p.Alive ? Color.FromArgb(132, 138, 155)
+                        : p.Friendly ? OverlayForm.Good : Color.White,
+                    p.Board is { } board
+                        ? board.Board.Select(m => new BoardCard(m.CardId, m.Name, $"{m.Attack}/{m.Health}",
+                            Marks(m), MarkInk(m))).ToList()
+                        : Array.Empty<BoardCard>());
+            })
             .ToList();
         return boards.Count == 0 ? null
             : new BoardPeek(OverlayForm.PeekRowCenter(_peekSlot, Slots(snap), _clientHeight), boards);
@@ -676,6 +672,8 @@ internal sealed class BattlegroundsPanel : UserControl
         if (m.Banner is { } b)
         {
             sb.AppendLine(b.Waiting ? b.Title : $"Шанс боя: {b.Title}");
+            if (!b.Waiting && b.Tie is double tie && b.Lose is double lose)
+                sb.AppendLine($"Ничья {tie * 100:0}% · поражение {lose * 100:0}%");
             if (b.Sub.Length > 0) sb.AppendLine(b.Sub);
             if (b.Team.Length > 0) sb.AppendLine(b.Team);
             sb.AppendLine();
@@ -792,9 +790,11 @@ internal sealed class BattlegroundsPanel : UserControl
             _tick.Stop();
             _refresh.Stop();
             _rating.Dispose();
+            _lobbyNames.Dispose();
             _art.Dispose();
             _reader.Dispose();
             _overlay.Dispose();
+            _speedStrip.Dispose();
         }
         base.Dispose(disposing);
     }

@@ -1,0 +1,11 @@
+{
+  "name": "gamespeed-bgs-sim",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Battlegrounds combat simulator service for the GameSpeed overlay. Wraps @firestone-hs/simulate-bgs-battle behind a small localhost HTTP endpoint.",
+  "dependencies": {
+    "@firestone-hs/reference-data": "3.0.219",
+    "@firestone-hs/simulate-bgs-battle": "1.1.774"
+  }
+}

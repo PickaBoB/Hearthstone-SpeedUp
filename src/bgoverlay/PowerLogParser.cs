@@ -1,4 +1,4 @@
-﻿using System.Text.RegularExpressions;
+using System.Text.RegularExpressions;
 
 namespace BgOverlay;
 
@@ -51,7 +51,28 @@ public sealed record GameOutcome(
 /// by place, best first. The board is there once we have fought them.
 /// </summary>
 public sealed record LobbyPlayer(int Place, int PlayerId, string Hero, string HeroCard,
-    bool Friendly, bool Alive, int Tier, SeenBoard? Board);
+    bool Friendly, bool Alive, int Tier, SeenBoard? Board, string? PlayerName = null);
+
+public enum BattlegroundsBuffKind { Undead, TavernSpells, Beetles, BloodGems }
+
+/// <summary>A player-wide Battlegrounds bonus, as the game tracks it.</summary>
+public sealed record BattlegroundsBuff(BattlegroundsBuffKind Kind, int Attack, int Health)
+{
+    public string CardId => Kind switch
+    {
+        BattlegroundsBuffKind.Undead => "BG25_011",
+        BattlegroundsBuffKind.TavernSpells => "BG28_168",
+        BattlegroundsBuffKind.Beetles => "BG28_603t",
+        _ => "BG20_GEM",
+    };
+
+    public string Value => Kind switch
+    {
+        BattlegroundsBuffKind.Undead when Health == 0 => $"+{Attack}",
+        BattlegroundsBuffKind.Beetles => $"{Attack}/{Health}",
+        _ => $"+{Attack}/+{Health}",
+    };
+}
 
 public sealed record GameSnapshot(
     bool InBattlegrounds,
@@ -69,7 +90,10 @@ public sealed record GameSnapshot(
     int BoardStats = 0,
     int BoardMinions = 0,
     CombatInfo? Combat = null,
-    bool CombatWaiting = false)
+    bool CombatWaiting = false,
+    bool CombatEnemyTeamOut = false,
+    CombatInfo? CombatOverall = null,
+    IReadOnlyList<BattlegroundsBuff>? Buffs = null)
 {
     public static readonly GameSnapshot Empty = new(false, false, [], [], false, null, null, null);
 }
@@ -98,14 +122,17 @@ public sealed class PowerLogParser
         public int Tag(string name) => Tags is not null && Tags.TryGetValue(name, out int v) ? v : 0;
     }
 
-    // Numeric tags kept per entity: only what a combat board needs.
+    // Numeric tags kept per entity: combat boards and player-wide bonuses.
     private static readonly HashSet<string> KeptTags =
     [
         "DAMAGE", "ARMOR", "TAUNT", "DIVINE_SHIELD", "POISONOUS", "VENOMOUS", "REBORN", "WINDFURY", "STEALTH",
         "MEGA_WINDFURY", "CANT_ATTACK",
-        "TAG_SCRIPT_DATA_NUM_1", "TAG_SCRIPT_DATA_NUM_2", "ATTACHED", "CREATOR", "PLAYER_TECH_LEVEL",
+        "TAG_SCRIPT_DATA_NUM_1", "TAG_SCRIPT_DATA_NUM_2", "TAG_SCRIPT_DATA_NUM_3", "TAG_SCRIPT_DATA_NUM_4",
+        "TAG_SCRIPT_DATA_NUM_5", "TAG_SCRIPT_DATA_NUM_6", "ATTACHED", "CREATOR", "PLAYER_TECH_LEVEL",
         "PLAYER_LEADERBOARD_PLACE",
         "EXHAUSTED", "BACON_DUO_TEAMMATE_PLAYER_ID", "COPIED_FROM_ENTITY_ID",
+        "BACON_BLOODGEMBUFFATKVALUE", "BACON_BLOODGEMBUFFHEALTHVALUE",
+        "TAVERN_SPELL_ATTACK_INCREASE", "TAVERN_SPELL_HEALTH_INCREASE",
     ];
 
     private sealed class RawChoice
@@ -126,6 +153,7 @@ public sealed class PowerLogParser
     private static readonly Regex ReChoiceHead = new(@"^id=(\d+) Player=(.*?) TaskList=\S* ChoiceType=(\w+)", RegexOptions.Compiled);
     private static readonly Regex ReChosen     = new(@"^id=(\d+)\b", RegexOptions.Compiled);
     private static readonly Regex RePlayer     = new(@"^Player EntityID=(\d+) PlayerID=(\d+) GameAccountId=\[hi=(\d+)", RegexOptions.Compiled);
+    private static readonly Regex RePlayerInfo = new(@"^PlayerID=(\d+), PlayerName=(.+)$", RegexOptions.Compiled);
 
     private const string LesserTrinketSource  = "cardId=BG30_Trinket_1st ";
     private const string GreaterTrinketSource = "cardId=BG30_Trinket_2nd ";
@@ -174,6 +202,9 @@ public sealed class PowerLogParser
     // only honest figure is the one we watched fight.
     private readonly Dictionary<int, SeenBoard> _seen = new();
     private readonly Dictionary<int, int> _places = new();
+    // Names in DebugPrintGame metadata: the local player and, in duos, their
+    // teammate. The other opponents come from the client's shared player info.
+    private readonly Dictionary<int, string> _names = new();
     // The standings as the player sees them: the data stream reorders the
     // leaderboard seconds before the animation does, and a board shown
     // against the wrong portrait is worse than none.
@@ -237,8 +268,12 @@ public sealed class PowerLogParser
         _theirs.Clear();
         _blows = new List<CombatInfo>();
         _lastBlows = new List<CombatInfo>();
+        _finalCombatId = 0;
+        _finalCombat = null;
+        _finalOverall = null;
         _seen.Clear();
         _places.Clear();
+        _names.Clear();
         _screenPlaces.Clear();
         _seenThisFight.Clear();
         _mateBoard = Array.Empty<SimSide>();
@@ -248,6 +283,13 @@ public sealed class PowerLogParser
         _screenTurn = 0;
         _screenCombat = false;
         _screenBlows = 0;
+    }
+
+    /// <summary>Every board reading of the fight in progress (and the one
+    /// just closed), for the --blows diagnostic.</summary>
+    public (List<CombatInfo> Current, List<CombatInfo> Previous) DebugBlows()
+    {
+        lock (_lock) return (_blows.ToList(), _lastBlows.ToList());
     }
 
     public void Feed(string line)
@@ -450,12 +492,24 @@ public sealed class PowerLogParser
             return;
         }
         int target = RefId(who);
+        // Player-wide tags use the BattleTag instead of an entity reference.
+        if (target == 0 && who == _myName) target = _meEntity;
         if (target > 0) ApplyTag(target, Get(target), tag, value, fromBlock: false);
     }
 
     private void OnGame(string s)
     {
-        if (s.StartsWith("GameType=", StringComparison.Ordinal)) _gameType = s.Substring(9).Trim();
+        if (s.StartsWith("GameType=", StringComparison.Ordinal)) { _gameType = s.Substring(9).Trim(); return; }
+        Match m = RePlayerInfo.Match(s);
+        if (m.Success && int.TryParse(m.Groups[1].Value, out int pid))
+        {
+            string name = m.Groups[2].Value.Trim();
+            // The log carries the full BattleTag; the game itself shows the
+            // name without the "#1234" discriminator, and so do we.
+            int hash = name.LastIndexOf('#');
+            if (hash > 0 && int.TryParse(name.AsSpan(hash + 1), out _)) name = name.Substring(0, hash);
+            if (name.Length > 0) _names[pid] = name;
+        }
     }
 
     private void OnChoices(string s)
@@ -616,6 +670,9 @@ public sealed class PowerLogParser
             Blow = _blow,
             MyBench = bench,
             BenchTurn = weFight ? _mateTurn : turn,
+            // The simulator's summon pools follow the lobby's tribes; only
+            // the confident read is worth trusting with that.
+            ValidTribes = Races() is { Confident: true } r ? r.Tribes : Array.Empty<int>(),
         });
     }
 
@@ -650,13 +707,11 @@ public sealed class PowerLogParser
                 .ToList();
             var powers = _entities
                 .Where(kv => kv.Value.CardType == "HERO_POWER" && Mine(kv))
-                .Select(kv => new SimCard(kv.Key, kv.Value.CardId, kv.Value.Tag("EXHAUSTED") != 0,
-                    kv.Value.Tag("TAG_SCRIPT_DATA_NUM_1"), kv.Value.Tag("TAG_SCRIPT_DATA_NUM_2")))
+                .Select(kv => ToCard(kv.Key, kv.Value, kv.Value.Tag("EXHAUSTED") != 0))
                 .ToList();
             var trinkets = _entities
                 .Where(kv => kv.Value.CardType == "BATTLEGROUND_TRINKET" && Mine(kv))
-                .Select(kv => new SimCard(kv.Key, kv.Value.CardId, false,
-                    kv.Value.Tag("TAG_SCRIPT_DATA_NUM_1"), kv.Value.Tag("TAG_SCRIPT_DATA_NUM_2")))
+                .Select(kv => ToCard(kv.Key, kv.Value, false))
                 .ToList();
 
             into.Add(new SimSide(from, h.CardId, h.Name, h.Health - h.Tag("DAMAGE") + h.Tag("ARMOR"),
@@ -735,6 +790,11 @@ public sealed class PowerLogParser
         .FirstOrDefault(e => e.CardType == "HERO" && e.PlayerId == pid && e.Name is { Length: > 0 }
                           && IsCombatHero(e.CardId))?.Name;
 
+    private static SimCard ToCard(int id, Entity e, bool used) =>
+        new(id, e.CardId, used, e.Tag("TAG_SCRIPT_DATA_NUM_1"), e.Tag("TAG_SCRIPT_DATA_NUM_2"),
+            e.Tag("TAG_SCRIPT_DATA_NUM_3"), e.Tag("TAG_SCRIPT_DATA_NUM_4"),
+            e.Tag("TAG_SCRIPT_DATA_NUM_5"), e.Tag("TAG_SCRIPT_DATA_NUM_6"));
+
     private static SimMinion ToMinion(int id, Entity e, IEnumerable<KeyValuePair<int, Entity>> ench) =>
         new(id, e.CardId, e.Atk, e.Health - e.Tag("DAMAGE"), e.Health,
             e.Tag("TAUNT") != 0, e.Tag("DIVINE_SHIELD") != 0, e.Tag("POISONOUS") != 0, e.Tag("VENOMOUS") != 0,
@@ -744,7 +804,9 @@ public sealed class PowerLogParser
                 x.Value.Tag("TAG_SCRIPT_DATA_NUM_1"), x.Value.Tag("TAG_SCRIPT_DATA_NUM_2"), x.Key)).ToList(),
             // Mega-windfury comes either as its own tag or as a windfury of 3.
             e.Tag("MEGA_WINDFURY") != 0 || e.Tag("WINDFURY") > 2,
-            e.Tag("CANT_ATTACK") != 0);
+            e.Tag("CANT_ATTACK") != 0,
+            e.Tag("TAG_SCRIPT_DATA_NUM_3"), e.Tag("TAG_SCRIPT_DATA_NUM_4"),
+            e.Tag("TAG_SCRIPT_DATA_NUM_5"), e.Tag("TAG_SCRIPT_DATA_NUM_6"));
 
     private void SeedFromBrackets(string s)
     {
@@ -843,7 +905,8 @@ public sealed class PowerLogParser
                 pid == _me || (mate != 0 && pid == mate),
                 hero.Health == 0 || hp > 0,
                 tier > 0 ? tier : board?.TechLevel ?? 0,
-                board));
+                board,
+                _names.TryGetValue(pid, out string? nick) ? nick : null));
         }
         lobby.Sort((a, b) => (a.Place == 0 ? 99 : a.Place).CompareTo(b.Place == 0 ? 99 : b.Place));
         return lobby;
@@ -882,6 +945,52 @@ public sealed class PowerLogParser
         return string.Join(" · ", marks);
     }
 
+    /// <summary>The local player's global bonuses, using the same tags as the game.</summary>
+    private IReadOnlyList<BattlegroundsBuff> Buffs()
+    {
+        var buffs = new List<BattlegroundsBuff>(4);
+        if (_me == 0) return buffs;
+
+        int undeadAttack = 0, undeadHealth = 0, beetleAttack = 0, beetleHealth = 0;
+        foreach (Entity e in _entities.Values)
+        {
+            if (e.Controller != _me) continue;
+            if (e.CardId == "BG25_011pe")
+            {
+                undeadAttack = Math.Max(undeadAttack, e.Tag("TAG_SCRIPT_DATA_NUM_1"));
+                undeadHealth = Math.Max(undeadHealth, e.Tag("TAG_SCRIPT_DATA_NUM_2"));
+            }
+            else if (e.CardId == "BG31_808pe")
+            {
+                beetleAttack = Math.Max(beetleAttack, e.Tag("TAG_SCRIPT_DATA_NUM_1"));
+                beetleHealth = Math.Max(beetleHealth, e.Tag("TAG_SCRIPT_DATA_NUM_2"));
+            }
+        }
+        if (undeadAttack > 0 || undeadHealth > 0)
+            buffs.Add(new BattlegroundsBuff(BattlegroundsBuffKind.Undead, undeadAttack, undeadHealth));
+
+        if (_meEntity != 0)
+        {
+            Entity player = Get(_meEntity);
+            int spellAttack = player.Tag("TAVERN_SPELL_ATTACK_INCREASE");
+            int spellHealth = player.Tag("TAVERN_SPELL_HEALTH_INCREASE");
+            // One/one is what an unbuffed Tavern spell already does.
+            if (spellAttack > 1 || spellHealth > 1)
+                buffs.Add(new BattlegroundsBuff(BattlegroundsBuffKind.TavernSpells,
+                    Math.Max(1, spellAttack), Math.Max(1, spellHealth)));
+
+            if (beetleAttack > 0 || beetleHealth > 0)
+                buffs.Add(new BattlegroundsBuff(BattlegroundsBuffKind.Beetles,
+                    2 + beetleAttack, 2 + beetleHealth));
+
+            int gemAttack = player.Tag("BACON_BLOODGEMBUFFATKVALUE");
+            int gemHealth = player.Tag("BACON_BLOODGEMBUFFHEALTHVALUE");
+            if (gemAttack > 0 || gemHealth > 0)
+                buffs.Add(new BattlegroundsBuff(BattlegroundsBuffKind.BloodGems, 1 + gemAttack, 1 + gemHealth));
+        }
+        return buffs;
+    }
+
     public GameSnapshot Snapshot()
     {
         lock (_lock)
@@ -913,32 +1022,119 @@ public sealed class PowerLogParser
                 }
             }
 
-            // The fight on screen, blow by blow. Which readings are its own
-            // is told by the turn: the data runs ahead and may already be
-            // reading the next fight.
+            // The fight on screen. Which readings are its own is told by the
+            // turn: the data runs ahead and may already be reading the next
+            // fight. The data is also dealt the whole relay at once, while
+            // the player watches it blow by blow -- so which reading stands
+            // is decided by how far the screen has got (_screenBlows), not by
+            // what the data already holds. Once the last enemy board steps
+            // in, the remaining relay is counted once and kept: the partner's
+            // later entrance is already part of that count.
             int shopTurn = (turn + 1) / 2;
             List<CombatInfo>? blows =
                 _blows.Count > 0 && (!_sawScreen || _blows[0].Turn == shopTurn) ? _blows :
                 _lastBlows.Count > 0 && _lastBlows[0].Turn == shopTurn ? _lastBlows : null;
-            // Each reading carries the blow it belongs to, and the last of the
-            // blow on screen is the board as that blow left it. Before the
-            // first blow the minions are still taking the field, and what the
-            // data holds is no use to the player yet. Without the animation's
-            // lines there is no clock, so the fight stays at its opening.
             CombatInfo? combat = null;
-            if (onScreenCombat && blows is not null)
+            CombatInfo? overall = null;
+            bool enemyTeamOut = false;
+            if (onScreenCombat && blows is not null
+                && _finalCombat is not null && _finalCombatId == blows[0].Id)
             {
-                if (!_sawScreen) combat = blows[0];
-                else
-                    for (int i = blows.Count - 1; i >= 0; i--)
-                        if (blows[i].Blow <= _screenBlows) { combat = blows[i]; break; }
+                combat = _finalCombat;
+                overall = _finalOverall;
+                enemyTeamOut = true;
+            }
+            else if (onScreenCombat && blows is not null)
+            {
+                int screenBlows = _sawScreen ? _screenBlows : int.MaxValue;
+                var myOut = new HashSet<int>();
+                var theirOut = new HashSet<int>();
+                foreach (CombatInfo b in blows)
+                {
+                    if (b.Blow > screenBlows) break;
+                    myOut.UnionWith(b.Mine.Select(s => s.HeroEntityId));
+                    theirOut.UnionWith(b.Theirs.Select(s => s.HeroEntityId));
+                    if (combat is null) { combat = b; continue; }
+                    bool newEnemy = b.Theirs.Count != combat.Theirs.Count
+                        || b.Theirs[^1].HeroEntityId != combat.Theirs[^1].HeroEntityId;
+                    bool newMine = b.Mine.Count != combat.Mine.Count
+                        || b.Mine[^1].HeroEntityId != combat.Mine[^1].HeroEntityId;
+                    if (newEnemy) enemyTeamOut = true;
+                    if (newEnemy || newMine) combat = b;
+                }
+                // Before the first blow the screen has no reading of its own
+                // yet; the opening line-up stands in, and the waiting count
+                // starts from it rather than adding it a second time.
+                if (combat is null)
+                {
+                    combat = blows[0];
+                    myOut.UnionWith(blows[0].Mine.Select(s => s.HeroEntityId));
+                    theirOut.UnionWith(blows[0].Theirs.Select(s => s.HeroEntityId));
+                }
+
+                // A second enemy board the data does not hold at all is one
+                // this fight will never see (a dead opponent's team fields a
+                // single board): no point holding the figure back for it.
+                // Before the first blow the fight's dump may still be
+                // streaming in, so its absence is not trusted yet.
+                bool enemySecondInData = blows.Any(b => b.Theirs.Any(s => !theirOut.Contains(s.HeroEntityId)));
+                if (!enemySecondInData && screenBlows > 0) enemyTeamOut = true;
+
+                // The boards still waiting behind the current line-up are in
+                // the data already. Counted in, the figure is the whole
+                // fight -- the remaining relay once they join -- rather than
+                // just the pairing on the field.
+                var myWaiting = new List<SimSide>();
+                var theirWaiting = new List<SimSide>();
+                foreach (CombatInfo b in blows)
+                {
+                    if (b.Blow <= screenBlows) continue;
+                    foreach (SimSide s in b.Mine) if (myOut.Add(s.HeroEntityId)) myWaiting.Add(s);
+                    foreach (SimSide s in b.Theirs) if (theirOut.Add(s.HeroEntityId)) theirWaiting.Add(s);
+                }
+                if (myWaiting.Count > 0 || theirWaiting.Count > 0)
+                    overall = Overall(combat, myWaiting, theirWaiting);
+                if (enemyTeamOut)
+                {
+                    _finalCombatId = combat.Id;
+                    _finalCombat = combat;
+                    _finalOverall = overall;
+                }
             }
 
             var seen = _seen.Values.OrderByDescending(b => b.Turn).ThenBy(b => b.PlayerId).ToList();
             return new GameSnapshot(true, IsDuo, counts, tribes, confident, BuildChoice(), seen, Lobby(),
                 hero?.CardId, hero?.Name, shopTurn, onScreenCombat, _boardStats, _boardMinions,
-                combat, onScreenCombat && combat is null);
+                combat, onScreenCombat && combat is null, enemyTeamOut, overall, Buffs());
         }
+    }
+
+    private CombatInfo? _overall;
+    private string _overallKey = "";
+    private CombatInfo? _finalCombat;
+    private CombatInfo? _finalOverall;
+    private int _finalCombatId;
+
+    /// <summary>
+    /// The fight counted whole: the line-up on the field plus every board
+    /// still waiting to step in. Kept as one instance per line-up so the
+    /// guess is not played out anew on every snapshot.
+    /// </summary>
+    private CombatInfo Overall(CombatInfo field, List<SimSide> myWaiting, List<SimSide> theirWaiting)
+    {
+        string key = field.Key
+            + "|" + string.Join(",", myWaiting.Select(s => s.HeroEntityId))
+            + "|" + string.Join(",", theirWaiting.Select(s => s.HeroEntityId));
+        if (_overall is null || _overallKey != key)
+        {
+            _overall = new CombatInfo(field.Id, field.Turn, field.IsDuo,
+                field.Mine.Concat(myWaiting).ToList(), field.Theirs.Concat(theirWaiting).ToList())
+            {
+                ValidTribes = field.ValidTribes,
+            };
+            _overallKey = key;
+        }
+        return _overall;
     }
 
     private PendingChoice? BuildChoice()

@@ -1,33 +1,25 @@
-﻿using System.Drawing.Drawing2D;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 
 namespace BgOverlay;
 
-public enum PanelStyle { Title, Pair, Note, Rule, Section, Tribe }
+public enum PanelStyle { Title, Pair, Note, Rule, Section }
 
 /// <summary>
-/// One row of the side panel: the heading with the hero's face and tier chip,
-/// a section caption, a label with its value and an optional meter, a tribe
-/// with how much it moves the hero's average place, small print, a separator.
+/// One row of the side panel: a hero heading, a section caption, a label with
+/// its value, small print or a separator.
 /// </summary>
-public sealed record PanelLine(PanelStyle Style, string Text, string Value, Color Ink, double Bar = -1,
-    string Card = "")
+public sealed record PanelLine(PanelStyle Style, string Text, string Value, Color Ink, string Card = "")
 {
     public static PanelLine Title(string text, string chip, Color ink, string card = "") =>
-        new(PanelStyle.Title, text, chip, ink, -1, card);
-    public static PanelLine Pair(string label, string value, Color ink, double bar = -1) =>
-        new(PanelStyle.Pair, label, value, ink, bar);
+        new(PanelStyle.Title, text, chip, ink, card);
+    public static PanelLine Pair(string label, string value, Color ink) =>
+        new(PanelStyle.Pair, label, value, ink);
     public static PanelLine Note(string text, Color ink) => new(PanelStyle.Note, text, "", ink);
     public static PanelLine Rule() => new(PanelStyle.Rule, "", "", Color.Empty);
     /// <summary>A caption with a hairline out to the edge: what the rows under it are.</summary>
     public static PanelLine Section(string text) => new(PanelStyle.Section, text, "", Color.Empty);
-    /// <summary>
-    /// One tribe of the lobby. <paramref name="weight"/> is how far its row is
-    /// filled, 0..1, scaled against the strongest tribe of this lobby.
-    /// </summary>
-    public static PanelLine Tribe(string name, string value, Color ink, double weight = -1) =>
-        new(PanelStyle.Tribe, name, value, ink, weight);
 
     /// <summary>The row as one line of text, for the control window.</summary>
     public string Flat => Value.Length > 0 ? $"{Text}: {Value}" : Text;
@@ -47,7 +39,7 @@ public sealed record HistoryPanel(string Title, string Note, IReadOnlyList<Histo
 public sealed record BoardCard(string CardId, string Name, string Stats, string Marks, Color MarkInk);
 
 /// <summary>One board under the pointer, laid out the way the game lays it.</summary>
-public sealed record PeekBoard(string Hero, string HeroCard, string Note, Color Ink,
+public sealed record PeekBoard(string Title, string HeroCard, string Note, Color Ink,
     IReadOnlyList<BoardCard> Board);
 
 /// <summary>What to show beside the leaderboard portrait being hovered.</summary>
@@ -65,7 +57,8 @@ public sealed record OverlayModel(
     WinBanner? Banner = null,
     HistoryPanel? History = null,
     BoardPeek? Peek = null,
-    string Turn = "");
+    string Turn = "",
+    IReadOnlyList<BattlegroundsBuff>? Buffs = null);
 
 /// <summary>
 /// Borderless, click-through window laid exactly over the game's client area.
@@ -92,7 +85,6 @@ internal sealed class OverlayForm : Form
     /// <summary>The outline of a panel: brighter than a rule inside it, so the
     /// card has an edge of its own over whatever the game draws under it.</summary>
     private static readonly Color Frame    = Color.FromArgb(74, 80, 100);
-    private static readonly Color Track    = Color.FromArgb(33, 35, 46);
     /// <summary>The grey plate the turn counter sits on.</summary>
     private static readonly Color Plate    = Color.FromArgb(230, 66, 69, 82);
     public  static readonly Color Good     = Color.FromArgb(120, 230, 140);
@@ -172,6 +164,7 @@ internal sealed class OverlayForm : Form
         if (model.Banner is { } banner) DrawBanner(g, banner, w, h);
         if (model.Panel is { Count: > 0 } panel && Settings.Current.PanelEnabled) DrawPanel(g, panel, art, size, h);
         if (model.Turn.Length > 0 && Settings.Current.TurnEnabled) DrawTurn(g, model.Turn, size, h);
+        if (model.Buffs is { Count: > 0 } buffs) DrawBuffs(g, buffs, art, size, h);
         if (model.Kind is null) return;
 
         int n = model.Items.Count;
@@ -225,15 +218,27 @@ internal sealed class OverlayForm : Form
     /// <summary>Centered over the top of the play area, above the opponent.</summary>
     private static void DrawBanner(Graphics g, WinBanner b, float w, float h)
     {
-        float bw = 0.40f * h, bh = (b.Team.Length > 0 ? 0.105f : 0.086f) * h;
+        float bw = 0.40f * h, bh = (b.Waiting ? 0.086f : 0.065f) * h;
         var box = new RectangleF((w - bw) / 2, (float)(Settings.Current.BannerY * h), bw, bh);
-        Color accent = !b.Waiting && b.Win is double p ? WinColor(p) : Color.FromArgb(78, 84, 102);
-
         using var bg = new SolidBrush(Back);
-        using var bar = new SolidBrush(accent);
         using var edge = new Pen(Edge, Math.Max(1f, 0.0012f * h));
         g.FillRectangle(bg, box);
-        g.FillRectangle(bar, box.X, box.Y, box.Width, 0.005f * h);
+        if (b.Waiting)
+        {
+            using var bar = new SolidBrush(Color.FromArgb(78, 84, 102));
+            g.FillRectangle(bar, box.X, box.Y, box.Width, 0.005f * h);
+        }
+        else
+        {
+            Color[] accents = { Color.FromArgb(76, 217, 100), Color.FromArgb(240, 176, 64), Color.FromArgb(230, 80, 70) };
+            float stripeW = box.Width / accents.Length;
+            for (int i = 0; i < accents.Length; i++)
+            {
+                using var bar = new SolidBrush(accents[i]);
+                g.FillRectangle(bar, box.X + i * stripeW, box.Y,
+                    i == accents.Length - 1 ? box.Width - i * stripeW : stripeW, 0.005f * h);
+            }
+        }
         g.DrawRectangle(edge, box.X, box.Y, box.Width, box.Height);
 
         using var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
@@ -251,43 +256,29 @@ internal sealed class OverlayForm : Form
             return;
         }
 
-        using var winFont = new Font("Segoe UI", 0.040f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var capFont = new Font("Segoe UI", 0.0145f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var subFont2 = new Font("Segoe UI", 0.0135f * h, FontStyle.Regular, GraphicsUnit.Pixel);
-        using var winInk = new SolidBrush(accent);
-        using var subInk2 = new SolidBrush(Muted);
+        using var percentFont = new Font("Segoe UI", 0.030f * h, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var labelFont = new Font("Segoe UI", 0.0135f * h, FontStyle.Bold, GraphicsUnit.Pixel);
 
-        // The number carries the box; "победа" only says what it counts.
-        using var tight = new StringFormat(StringFormat.GenericTypographic);
-        SizeF num = g.MeasureString(b.Title, winFont, int.MaxValue, tight);
-        SizeF cap = g.MeasureString("победа ", capFont, int.MaxValue, tight);
-        float lead = 0.010f * h;
-        float nx = box.X + (box.Width - num.Width - cap.Width - lead) / 2;
-        g.DrawString(b.Title, winFont, winInk, new RectangleF(nx, box.Y + 0.008f * h, num.Width + 1, 0.046f * h), tight);
-        g.DrawString("победа", capFont, subInk2,
-            new RectangleF(nx + num.Width + lead, box.Y + 0.030f * h, cap.Width + 1, 0.020f * h), tight);
-        g.DrawString(b.Sub, subFont2, subInk2,
-            new RectangleF(box.X, box.Y + 0.054f * h, box.Width, 0.022f * h), center);
-
-        // Duos: the same fight with the partner's board counted in.
-        if (b.Team.Length > 0)
+        string tie = b.Tie is double t ? $"{t * 100:0}%" : "—";
+        string lose = b.Lose is double l ? $"{l * 100:0}%" : "—";
+        (string Value, string Label, Color Ink)[] parts =
         {
-            using var teamFont = new Font("Segoe UI", 0.0130f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var teamInk = new SolidBrush(b.TeamWin is double tw ? WinColor(tw) : Muted);
-            g.DrawString(b.Team, teamFont, teamInk,
-                new RectangleF(box.X, box.Y + 0.076f * h, box.Width, 0.022f * h), center);
-        }
-
-        if (b.Win is double win && b.Tie is double tie)
+            (b.Title, "Победа", Color.FromArgb(76, 217, 100)),
+            (tie, "Ничья", Color.FromArgb(240, 176, 64)),
+            (lose, "Поражение", Color.FromArgb(230, 80, 70)),
+        };
+        float partW = box.Width / parts.Length;
+        for (int i = 0; i < parts.Length; i++)
         {
-            float barY = box.Bottom - 0.0075f * h, barH = 0.0075f * h, x = box.X;
-            float wWin = (float)(box.Width * win), wTie = (float)(box.Width * tie);
-            using var winB = new SolidBrush(Color.FromArgb(76, 217, 100));
-            using var tieB = new SolidBrush(Color.FromArgb(200, 190, 80));
-            using var loseB = new SolidBrush(Color.FromArgb(230, 80, 70));
-            g.FillRectangle(winB, x, barY, wWin, barH);
-            g.FillRectangle(tieB, x + wWin, barY, wTie, barH);
-            g.FillRectangle(loseB, x + wWin + wTie, barY, box.Width - wWin - wTie, barH);
+            float x = box.X + i * partW;
+            using var ink = new SolidBrush(parts[i].Ink);
+            g.DrawString(parts[i].Value, percentFont, ink,
+                new RectangleF(x, box.Y + 0.007f * h, partW, 0.034f * h), center);
+            g.DrawString(parts[i].Label, labelFont, ink,
+                new RectangleF(x, box.Y + 0.040f * h, partW, 0.018f * h), center);
+            if (i > 0)
+                using (var separator = new Pen(Edge, Math.Max(1f, 0.0011f * h)))
+                    g.DrawLine(separator, x, box.Y + 0.012f * h, x, box.Y + 0.056f * h);
         }
     }
 
@@ -304,9 +295,8 @@ internal sealed class OverlayForm : Form
     }
 
     /// <summary>
-    /// The side panel: the hero with its tier, the board at this turn and
-    /// what the lobby's tribes do to the hero's average place. One framed
-    /// card, with a captioned section per question it answers.
+    /// The side panel: the hero with its tier and average place, the board
+    /// against this turn's average, and the tribes in the lobby.
     /// </summary>
     private static void DrawPanel(Graphics g, IReadOnlyList<PanelLine> lines, CardArt? art, Size size, float h)
     {
@@ -314,8 +304,8 @@ internal sealed class OverlayForm : Form
         float pad = 0.011f * h, gap = 0.0050f * h;
         float y = (float)(Settings.Current.PanelY * h);
         float inner = w - 2 * pad;
-        float titleH = 0.034f * h, pairH = 0.020f * h, tribeH = 0.0185f * h;
-        float sectionH = 0.023f * h, sectionAir = 0.006f * h, barH = 0.0050f * h;
+        float titleH = 0.034f * h, pairH = 0.020f * h;
+        float sectionH = 0.023f * h, sectionAir = 0.006f * h;
         float ruleH = Math.Max(1f, 0.0011f * h), radius = 0.009f * h;
 
         using var nameFont    = new Font("Segoe UI", 0.0170f * h, FontStyle.Bold, GraphicsUnit.Pixel);
@@ -323,8 +313,6 @@ internal sealed class OverlayForm : Form
         using var sectionFont = new Font("Segoe UI", 0.0110f * h, FontStyle.Bold, GraphicsUnit.Pixel);
         using var labelFont   = new Font("Segoe UI", 0.0140f * h, FontStyle.Regular, GraphicsUnit.Pixel);
         using var valueFont   = new Font("Segoe UI", 0.0158f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var tribeFont   = new Font("Segoe UI", 0.0140f * h, FontStyle.Regular, GraphicsUnit.Pixel);
-        using var valueSmall  = new Font("Segoe UI", 0.0140f * h, FontStyle.Bold, GraphicsUnit.Pixel);
         using var noteFont    = new Font("Segoe UI", 0.0126f * h, FontStyle.Regular, GraphicsUnit.Pixel);
         using var flow  = new StringFormat(StringFormat.GenericTypographic);
         using var clip  = new StringFormat(StringFormat.GenericTypographic)
@@ -341,8 +329,7 @@ internal sealed class OverlayForm : Form
         {
             PanelStyle.Title   => titleH,
             PanelStyle.Section => sectionH,
-            PanelStyle.Tribe   => tribeH,
-            PanelStyle.Pair    => pairH + (l.Bar >= 0 ? barH + 0.0035f * h : 0),
+            PanelStyle.Pair    => pairH,
             PanelStyle.Note    => g.MeasureString(l.Text, noteFont, new SizeF(inner, 1e4f), flow).Height + 0.0015f * h,
             _                  => ruleH + gap,
         };
@@ -419,38 +406,6 @@ internal sealed class OverlayForm : Form
                 case PanelStyle.Pair:
                     g.DrawString(l.Text, labelFont, labelInk, new RectangleF(tx, cy, inner, pairH), midLeft);
                     g.DrawString(l.Value, valueFont, ink, new RectangleF(tx, cy, inner, pairH), midRight);
-                    if (l.Bar >= 0)
-                    {
-                        float by = cy + pairH + 0.0015f * h;
-                        using (GraphicsPath track = Pill(new RectangleF(tx, by, inner, barH), barH / 2))
-                        using (var trackInk = new SolidBrush(Track))
-                            g.FillPath(trackInk, track);
-                        float fill = (float)(inner * Math.Clamp(l.Bar, 0, 1));
-                        if (fill > barH)
-                            using (GraphicsPath bar = Pill(new RectangleF(tx, by, fill, barH), barH / 2))
-                                g.FillPath(ink, bar);
-                        // Where the average of this turn sits on the meter.
-                        using var mark = new SolidBrush(Color.FromArgb(150, 156, 175));
-                        g.FillRectangle(mark, tx + inner / 2, by - 0.0010f * h,
-                            Math.Max(1f, 0.0013f * h), barH + 0.0020f * h);
-                    }
-                    break;
-
-                case PanelStyle.Tribe:
-                    // How much this tribe is worth, as how far its row fills.
-                    if (l.Bar > 0)
-                    {
-                        float room = inner - 0.048f * h;      // the value keeps its own column
-                        float width = Math.Max(0.012f * h, (float)(room * Math.Clamp(l.Bar, 0, 1)));
-                        using (GraphicsPath heat = Pill(new RectangleF(tx, cy, width, tribeH - 0.0020f * h), 0.004f * h))
-                        using (var heatInk = new SolidBrush(Color.FromArgb(52, l.Ink)))
-                            g.FillPath(heatInk, heat);
-                    }
-                    using (var tribeInk = new SolidBrush(Ink))
-                        g.DrawString(l.Text, tribeFont, tribeInk,
-                            new RectangleF(tx + 0.005f * h, cy, inner - 0.055f * h, tribeH - 0.0020f * h), midLeft);
-                    g.DrawString(l.Value, valueSmall, ink,
-                        new RectangleF(tx, cy, inner - 0.005f * h, tribeH - 0.0020f * h), midRight);
                     break;
 
                 case PanelStyle.Note:
@@ -492,6 +447,78 @@ internal sealed class OverlayForm : Form
     /// </summary>
     private static float PlayLeft(Size size) =>
         Math.Max(0f, (size.Width - size.Height * 16f / 9f) / 2f);
+
+    /// <summary>Player-wide bonuses, above the coins in the bottom right.</summary>
+    private static void DrawBuffs(Graphics g, IReadOnlyList<BattlegroundsBuff> buffs, CardArt? art,
+        Size size, float h)
+    {
+        using var font = new Font("Segoe UI", 0.0155f * h, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var tight = new StringFormat(StringFormat.GenericTypographic) { FormatFlags = StringFormatFlags.NoWrap };
+        using var middle = new StringFormat(StringFormat.GenericTypographic)
+            { FormatFlags = StringFormatFlags.NoWrap, LineAlignment = StringAlignment.Center };
+
+        float icon = 0.026f * h, boxH = 0.034f * h, pad = 0.006f * h, gap = 0.005f * h;
+        var widths = buffs.Select(b => 2 * pad + icon + gap + g.MeasureString(b.Value, font, int.MaxValue, tight).Width)
+            .ToList();
+        int rows = (buffs.Count + 1) / 2;
+        var columns = new float[Math.Min(2, buffs.Count)];
+        for (int i = 0; i < buffs.Count; i++) columns[i % 2] = Math.Max(columns[i % 2], widths[i]);
+        float total = columns.Sum() + (columns.Length - 1) * gap;
+        float playWidth = Math.Min(size.Width, h * 16f / 9f);
+        float left = PlayLeft(size) + playWidth - 0.025f * h - total - 100f;
+        float top = 0.850f * h - rows * boxH - (rows - 1) * gap;
+
+        SmoothingMode was = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        for (int i = 0; i < buffs.Count; i++)
+        {
+            BattlegroundsBuff buff = buffs[i];
+            int column = i % 2;
+            float x = left + (column == 1 ? columns[0] + gap : 0);
+            float y = top + i / 2 * (boxH + gap);
+            var box = new RectangleF(x, y, columns[column], boxH);
+            using (GraphicsPath plate = Pill(box, 0.006f * h))
+            {
+                using var fill = new SolidBrush(Back);
+                using var rim = new Pen(Frame, Math.Max(1f, 0.0012f * h));
+                g.FillPath(fill, plate);
+                g.DrawPath(rim, plate);
+            }
+
+            var face = new RectangleF(x + pad, y + (boxH - icon) / 2, icon, icon);
+            DrawBuffIcon(g, buff.CardId, art, face, h);
+            using var ink = new SolidBrush(Ink);
+            g.DrawString(buff.Value, font, ink,
+                new RectangleF(face.Right + gap, y, box.Width - icon - 2 * pad - gap, boxH), middle);
+        }
+        g.SmoothingMode = was;
+    }
+
+    private static void DrawBuffIcon(Graphics g, string cardId, CardArt? art, RectangleF box, float h)
+    {
+        Image? square = art?.Art(cardId);
+        Image? pic = square ?? art?.Tile(cardId);
+        using var path = new GraphicsPath();
+        path.AddEllipse(box);
+        Region old = g.Clip;
+        g.SetClip(path, CombineMode.Replace);
+        if (pic is not null)
+        {
+            RectangleF src = square is not null
+                ? new RectangleF(pic.Width * 0.148f, pic.Height * 0.078f,
+                                 pic.Width * 0.703f, pic.Height * 0.703f)
+                : new RectangleF(pic.Width * 0.52f - pic.Height / 2f, 0, pic.Height, pic.Height);
+            g.DrawImage(pic, box, src, GraphicsUnit.Pixel);
+        }
+        else
+        {
+            using var empty = new SolidBrush(Color.FromArgb(34, 36, 48));
+            g.FillRectangle(empty, box);
+        }
+        g.Clip = old;
+        using var rim = new Pen(Color.FromArgb(200, 174, 145, 91), Math.Max(1f, 0.0012f * h));
+        g.DrawEllipse(rim, box);
+    }
 
     /// <summary>One portrait's share of the strip.</summary>
     private static float Step(int slots, float h) =>
@@ -535,7 +562,7 @@ internal sealed class OverlayForm : Form
             float bench = portrait + 0.012f * h;     // room for the hero's own face
             float width = bench + Math.Max(1, board.Board.Count) * oval
                         + Math.Max(0, board.Board.Count - 1) * gap;
-            SizeF hero = g.MeasureString(board.Hero, heroFont, int.MaxValue, left);
+            SizeF hero = g.MeasureString(board.Title, heroFont, int.MaxValue, left);
 
             // A soft oval backing, enough to lift the row off the table
             // without the game disappearing behind it.
@@ -556,7 +583,7 @@ internal sealed class OverlayForm : Form
             float py = cy + (rowH - portrait) / 2 - 0.002f * h;
             DrawFace(g, board.HeroCard, art, new RectangleF(x, py, portrait, portrait), board.Ink, h);
 
-            Outlined(g, board.Hero, heroFont, board.Ink,
+            Outlined(g, board.Title, heroFont, board.Ink,
                 new RectangleF(x + bench, cy, 0.30f * h, line), left, h);
             Outlined(g, board.Note, noteFont, Muted,
                 new RectangleF(x + bench + hero.Width + 0.008f * h, cy + 0.002f * h, 0.30f * h, line), left, h);
@@ -1002,24 +1029,24 @@ internal sealed class OverlayForm : Form
         var panel = new List<PanelLine>
         {
             PanelLine.Title("Вечная Токи", "B", TierColor("B"), "TB_BaconShop_HERO_28"),
-            PanelLine.Pair("Место с этими расами", "3,95", Ink),
-            PanelLine.Note("топ-4 59% · 1-е 15%", Muted),
-            PanelLine.Section("Ход 8 · таверна"),
-            PanelLine.Pair("Сила доски", "260", Good, 0.6),
-            PanelLine.Note("121% от средней (215) · 7 существ", Muted),
-            PanelLine.Pair("Бои героя на ходу", "52%", Ink),
-            PanelLine.Section("Расы лобби · сдвиг места"),
-            PanelLine.Tribe("Звери", "−0,21", Good, 1.0),
-            PanelLine.Tribe("Драконы", "−0,12", Good, 0.57),
-            PanelLine.Tribe("Нежить", "±0,01", Muted),
-            PanelLine.Tribe("Пираты", "+0,09", Bad, 0.43),
-            PanelLine.Tribe("Демоны", "—", Dim),
-            PanelLine.Note("Firestone · все игроки", Dim),
+            PanelLine.Pair("Среднее место", "3,95", Ink),
+            PanelLine.Section("Доска · 7 существ"),
+            PanelLine.Pair("Ваши статы", "260", Good),
+            PanelLine.Pair("Средние на ходу", "215", Ink),
+            PanelLine.Note("на 21% выше средней", Muted),
+            PanelLine.Section("Расы в лобби"),
+            PanelLine.Note("Звери, Драконы, Нежить, Пираты, Демоны", Muted),
         };
-        var banner = new WinBanner(false, "64%", "ничья 9% · поражение 27%  ·  420 против 310", 0.64, 0.09, 0.27,
+        var banner = new WinBanner(false, "30%", "420 против 310", 0.30, 0.60, 0.10,
             "с союзником 78%  ·  730 против 310", 0.78);
         return new OverlayModel(kind, items, "Пример расположения — подгоните высоту в окне", panel, banner,
-            Turn: "Ход 8");
+            Turn: "Ход 8", Buffs:
+            [
+                new BattlegroundsBuff(BattlegroundsBuffKind.Undead, 12, 0),
+                new BattlegroundsBuff(BattlegroundsBuffKind.TavernSpells, 4, 8),
+                new BattlegroundsBuff(BattlegroundsBuffKind.Beetles, 14, 10),
+                new BattlegroundsBuff(BattlegroundsBuffKind.BloodGems, 3, 5),
+            ]);
     }
 
     /// <summary>Made-up past games, for looking at the list without playing.</summary>
@@ -1069,10 +1096,10 @@ internal sealed class OverlayForm : Form
             b.Marks.Contains("яд") ? Good : Muted)).ToList();
         var peek = new BoardPeek(0.42f * 1080f,
         [
-            new PeekBoard("2. Вечная Токи  ★6", "TB_BaconShop_HERO_28",
-                "ход 13 · 15054 ат.+зд. · 5 зд.", Ink, cards),
-            new PeekBoard("2. Клонист Зерек  ★5", "BG31_HERO_005",
-                "ход 12 · 12754 ат.+зд. · 13 зд.", Ink, cards.Take(5).ToList()),
+            new PeekBoard("2. ShadowFox  ★6", "TB_BaconShop_HERO_28",
+                "Вечная Токи · ход 13 · 15054 ат.+зд. · 5 зд.", Ink, cards),
+            new PeekBoard("2. NightWolf  ★5", "BG31_HERO_005",
+                "Клонист Зерек · ход 12 · 12754 ат.+зд. · 13 зд.", Ink, cards.Take(5).ToList()),
         ]);
         return new OverlayModel(null, [], "", null, null, null, peek);
     }

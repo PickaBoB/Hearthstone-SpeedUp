@@ -12,3 +12,6 @@ src/bgoverlay/obj/
 *.obj
 .vs/
 *.user
+sim/node_modules/
+sim/.cache/
+sim/cards.json.gz

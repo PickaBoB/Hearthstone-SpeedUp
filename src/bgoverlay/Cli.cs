@@ -1,4 +1,4 @@
-﻿using System.Drawing.Drawing2D;
+using System.Drawing.Drawing2D;
 using System.Text;
 
 namespace BgOverlay;
@@ -41,12 +41,17 @@ internal static class Cli
             }
         }
         if (rating) return ShowRating();
+        if (args.Contains("--sim")) return SimTest();
+        if (args.Contains("--blows") && path is not null) return Blows(path);
+        if (args.Contains("--relay") && path is not null) return Relay(path);
+        if (args.Contains("--buffs") && path is not null) return BuffLog(path);
         if (shot is not null) return Shot(shot, kind, size, history, peek, over);
         if (path is null)
         {
-            Console.WriteLine("Использование: BgOverlay --replay <Power.log> [--mmr 100|50|25|10|1]");
+            Console.WriteLine("Использование: BgOverlay --replay <Power.log> [--mmr 100|50|25|10|1] [--blows|--relay|--buffs]");
             Console.WriteLine("               BgOverlay --shot <file.png> [--kind hero|trinket|history|peek] [--size 1920x1080]");
             Console.WriteLine("               BgOverlay --rating");
+            Console.WriteLine("               BgOverlay --sim");
             return 2;
         }
 
@@ -66,6 +71,7 @@ internal static class Cli
         using var reader = new StreamReader(fs, Encoding.UTF8);
         bool inChoice = false;
         int lastPrinted = -1, lastCombat = -1, game = 0;
+        GameSnapshot? pending = null;
         string? line;
         while ((line = reader.ReadLine()) is not null)
         {
@@ -109,21 +115,28 @@ internal static class Cli
                     lastPrinted = c.Id;
                     Print(line, shown, stats);
                 }
-                if (shown.Combat is { } fight && fight.Id != lastCombat)
-                {
-                    lastCombat = fight.Id;
-                    PrintCombat(shown);
-                }
             }
 
-            if (line.Contains("GameState.DebugPrintPower() - BLOCK_START BlockType=ATTACK", StringComparison.Ordinal))
+            // The review's fight line goes out once the whole fight is
+            // known: in duos the relay's later boards stream in a moment
+            // after the first reading, and a single-wave fight is told apart
+            // only once it is over.
+            var cur = parser.Snapshot();
+            if (cur.Combat is { } f)
             {
-                var snap = parser.Snapshot();
-                if (snap.Combat is { } c && c.Id != lastCombat)
+                pending = cur;
+                if (f.Id != lastCombat && (!cur.IsDuo || cur.CombatOverall is not null))
                 {
-                    lastCombat = c.Id;
-                    PrintCombat(snap);
+                    lastCombat = f.Id;
+                    PrintCombat(cur);
+                    pending = null;
                 }
+            }
+            else if (pending is { Combat: { } p } && !cur.InCombat && p.Id != lastCombat)
+            {
+                lastCombat = p.Id;
+                PrintCombat(pending);
+                pending = null;
             }
         }
         if (game > 0 && parser.Snapshot().InBattlegrounds)
@@ -132,6 +145,135 @@ internal static class Cli
             PrintLobby(parser.Snapshot());
             PrintSeen(parser.Snapshot());
         }
+        return 0;
+    }
+
+    /// <summary>--buffs <Power.log>: every change of the local player's global bonuses.</summary>
+    private static int BuffLog(string path)
+    {
+        var parser = new PowerLogParser();
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(fs, Encoding.UTF8);
+        string last = "", time = "";
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (line.Length > 16 && line[0] == 'D' && line[1] == ' ') time = line.Substring(2, 12);
+            parser.Feed(line);
+            var snap = parser.Snapshot();
+            string current = string.Join(" · ", (snap.Buffs ?? []).Select(b => $"{b.Kind} {b.Value}"));
+            if (current == last) continue;
+            last = current;
+            Console.WriteLine($"{time}  {(current.Length > 0 ? current : "--")}");
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// --blows <Power.log>: every board reading of every fight — who stood
+    /// on each side. For checking what the parser saw of a relay (duos).
+    /// </summary>
+    private static int Blows(string path)
+    {
+        var parser = new PowerLogParser();
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(fs, Encoding.UTF8);
+        var seen = new HashSet<string>();
+        string? line;
+        int lastCount = 0;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            parser.Feed(line);
+            var (cur, _) = parser.DebugBlows();
+            if (cur.Count == 0) { lastCount = 0; continue; }
+            if (cur.Count == lastCount) continue;
+            lastCount = cur.Count;
+            CombatInfo b = cur[^1];
+            string Sides(IReadOnlyList<SimSide> ss) => string.Join("+",
+                ss.Select(s => $"{s.HeroCardId}#{s.HeroEntityId}:{s.Board.Count}сущ"));
+            Console.WriteLine($"бой {b.Id} ход {b.Turn} удар {b.Blow}: "
+                + $"мы [{Sides(b.Mine)}]  они [{Sides(b.Theirs)}]  скамейка {b.MyBench.Sum(s => s.Board.Count)}сущ");
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// --relay <Power.log>: what the overlay would have been shown, moment by
+    /// moment — every time the snapshot's combat reading changes, with the
+    /// log's own clock. For chasing a recalculation that never happens.
+    /// </summary>
+    private static int Relay(string path)
+    {
+        var parser = new PowerLogParser();
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(fs, Encoding.UTF8);
+        string? line;
+        string lastKey = "";
+        string time = "";
+        while ((line = reader.ReadLine()) is not null)
+        {
+            // Power.log lines open with "D 21:39:01.1234567".
+            if (line.Length > 16 && line[0] == 'D' && line[1] == ' ')
+                time = line.Substring(2, 12);
+            parser.Feed(line);
+            var snap = parser.Snapshot();
+            string key = snap.InCombat + "|" + snap.CombatWaiting + "|"
+                + snap.CombatEnemyTeamOut + "|" + (snap.Combat?.Key ?? "-")
+                + "|" + (snap.CombatOverall?.Key ?? "-");
+            if (key == lastKey) continue;
+            lastKey = key;
+            if (!snap.InCombat) { Console.WriteLine($"{time}  -- бой не на экране --"); continue; }
+            if (snap.Combat is not { } c) { Console.WriteLine($"{time}  бой, чтения нет"); continue; }
+            string Sides(IReadOnlyList<SimSide> ss) => string.Join("+",
+                ss.Select(s => $"{s.HeroCardId}#{s.HeroEntityId}:{s.Board.Count}сущ"));
+            Console.WriteLine($"{time}  бой {c.Id} ход {c.Turn} удар {c.Blow}"
+                + $"  враг2вышел={snap.CombatEnemyTeamOut}"
+                + $"  мы [{Sides(c.Mine)}]  они [{Sides(c.Theirs)}]"
+                + (snap.CombatOverall is { } o
+                    ? $"  весьбой мы [{Sides(o.Mine)}]  они [{Sides(o.Theirs)}]" : ""));
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// A stand-in fight through both simulators: the quick in-process one
+    /// answers at once, the full Firestone service refines it. Checks that
+    /// sim\server.mjs starts and answers beside the exe.
+    /// </summary>
+    private static int SimTest()
+    {
+        static SimMinion M(int id, string cardId, int atk, int hp,
+            bool reborn = false, bool shield = false, bool taunt = false) =>
+            new(id, cardId, atk, hp, hp, taunt, shield, false, false, reborn, false, false,
+                0, 0, Array.Empty<SimEnchant>());
+        static SimSide S(int hero, string heroCard, params SimMinion[] board) =>
+            new(hero, heroCard, null, 30, 4, Array.Empty<SimCard>(), Array.Empty<SimCard>(), board);
+
+        var combat = new CombatInfo(1, 8, false,
+            new[] { S(1, "TB_BaconShop_HERO_01",
+                M(11, "BGS_012", 3, 6, reborn: true), M(12, "BGS_061", 4, 1, shield: true), M(13, "BGS_010", 2, 2)) },
+            new[] { S(2, "TB_BaconShop_HERO_02",
+                M(21, "BGS_010", 6, 4), M(22, "BGS_010", 6, 4)) })
+        {
+            ValidTribes = new[] { 17, 20, 14, 15, 24 },
+        };
+
+        CombatGuess g = combat.Guess();
+        Console.WriteLine($"Быстрый расчёт:  победа {g.Win * 100:0.0}% / ничья {g.Tie * 100:0.0}% / поражение {g.Lose * 100:0.0}%");
+
+        for (int i = 0; i < 600; i++)
+        {
+            if (combat.Guess().Exact) break;
+            Thread.Sleep(100);
+        }
+        g = combat.Guess();
+        if (!g.Exact)
+        {
+            Console.WriteLine("Полный симулятор не ответил: sim\\server.mjs или node рядом с exe не найдены "
+                + "(тогда оверлей так и работает на быстром расчёте).");
+            return 1;
+        }
+        Console.WriteLine($"Полный расчёт:   победа {g.Win * 100:0.0}% / ничья {g.Tie * 100:0.0}% / поражение {g.Lose * 100:0.0}%");
         return 0;
     }
 
@@ -169,7 +311,7 @@ internal static class Cli
         var wanted = (model.Peek?.Boards.SelectMany(b => b.Board) ?? Enumerable.Empty<BoardCard>())
             .Concat(model.History?.Rows.SelectMany(r => r.Board) ?? Enumerable.Empty<BoardCard>())
             .ToList();
-        if (wanted.Count > 0)
+        if (wanted.Count > 0 || model.Buffs is { Count: > 0 })
         {
             // The tiles arrive over the network; a shot waits for them.
             foreach (BoardCard card in wanted)
@@ -181,6 +323,11 @@ internal static class Cli
                 art.Art(board.HeroCard);
             foreach (HistoryRow past in model.History?.Rows ?? Enumerable.Empty<HistoryRow>())
                 art.Art(past.HeroCard);
+            foreach (BattlegroundsBuff buff in model.Buffs ?? [])
+            {
+                art.Tile(buff.CardId);
+                art.Art(buff.CardId);
+            }
             Thread.Sleep(3000);
         }
 
@@ -235,6 +382,8 @@ internal static class Cli
         string avg = s?.AvgWarbandThisTurn is double a ? $"{a:0}" : "--";
         Console.WriteLine($"   ход {snap.Turn,2}: {hero}; армия {snap.BoardStats} ({snap.BoardMinions} сущ.), "
             + $"средняя {avg}; бои героя на ходу {wr}");
+        if (snap.Buffs is { Count: > 0 } buffs)
+            Console.WriteLine("           баффы: " + string.Join(" · ", buffs.Select(b => $"{b.Kind} {b.Value}")));
         // What this lobby's tribes do to that hero's average place.
         if (s is not null && s.Lobby.Any(t => t.Impact is not null))
             Console.WriteLine("           расы: " + string.Join(" · ", s.Lobby.Select(t =>
@@ -248,15 +397,16 @@ internal static class Cli
             Console.WriteLine($"   бой: жду карты ({(snap.IsDuo ? "дуэты" : "соло")})");
             return;
         }
-        var g = snap.Combat.Guess();
-        Console.WriteLine($"   бой ход {snap.Turn}, удар {snap.Combat.Blow}: "
+        // The print is a session review, not the live banner: the duos fight
+        // is counted whole right away, without waiting for the relay to
+        // reach the second boards on screen.
+        CombatInfo shown = snap.IsDuo ? snap.CombatOverall ?? snap.Combat : snap.Combat;
+        var g = shown.Guess();
+        Console.WriteLine($"   бой ход {snap.Turn}: "
             + $"{g.Win!.Value * 100:0}% поб. / {g.Tie * 100:0}% ничья / {g.Lose * 100:0}% пор.  "
-            + $"{g.MyStats} vs {g.TheirStats}  (мы {snap.Combat.Mine.Count} герой, они {snap.Combat.Theirs.Count})"
-            + string.Concat(snap.Combat.Mine.Select(s => $" | {s.HeroName ?? s.HeroCardId} {s.Board.Count}сущ {s.Stats}")));
-        if (snap.Combat.TeamGuess() is { } team)
-            Console.WriteLine($"        командой: {team.Win * 100:0}% поб. / {team.Tie * 100:0}% ничья / "
-                + $"{team.Lose * 100:0}% пор.  {team.MyStats} vs {team.TheirStats}"
-                + $"  (доска союзника {snap.Combat.MyBench.Sum(s => s.Stats)} с хода {snap.Combat.BenchTurn})");
+            + $"{g.MyStats} vs {g.TheirStats}  (мы {shown.Mine.Count} герой, они {shown.Theirs.Count})"
+            + string.Concat(shown.Mine.Select(s => $" | {s.HeroName ?? s.HeroCardId} {s.Board.Count}сущ {s.Stats}"))
+            + (g.Exact ? "" : "  ≈"));
     }
 
     private static void PrintOutcome(GameOutcome o)

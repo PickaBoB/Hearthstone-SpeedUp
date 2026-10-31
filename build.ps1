@@ -12,6 +12,8 @@
 
     -SkipNative     build only the .NET parts
     -SkipInjector   build only the C parts
+    -SkipSim        do not stage the combat-simulator service into .\bin\sim
+                    (the overlay then shows the quick estimate only)
     -Package        also make the end-user release in .\dist: a self-contained
                     single-file HearthstoneSpeedUp.exe (no .NET install
                     needed) plus gsunity64.dll, zipped
@@ -21,6 +23,7 @@
 param(
     [switch]$SkipNative,
     [switch]$SkipInjector,
+    [switch]$SkipSim,
     [switch]$Package,
     [string]$Version = '1.0.0'
 )
@@ -107,7 +110,77 @@ function Build-Native {
 '@
 }
 
+function Build-Sim {
+    # The combat-odds service: Firestone's full simulator (card scripts, not
+    # just keywords) behind sim\server.mjs. Staged next to the exe as
+    # bin\sim: server.mjs, node_modules, cards.json.gz and a portable node.exe.
+    $src    = Join-Path $root 'sim'
+    $cache  = Join-Path $src '.cache'
+    $simBin = Join-Path $bin 'sim'
+    New-Item -ItemType Directory -Force -Path $cache, $simBin | Out-Null
+
+    Write-Host 'Sim: node_modules' -ForegroundColor Cyan
+    Copy-Item (Join-Path $src 'package.json'), (Join-Path $src 'package-lock.json') $simBin -Force
+    Copy-Item (Join-Path $src 'server.mjs') $simBin -Force
+    $npm = Find-Tool 'npm'
+    if (-not $npm) { throw 'npm не найден: поставьте Node.js или соберите с -SkipSim' }
+    Push-Location $simBin
+    try {
+        & $npm ci --omit=dev --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
+    }
+    finally { Pop-Location }
+    # Type declarations and source maps are dead weight at runtime.
+    Get-ChildItem (Join-Path $simBin 'node_modules') -Recurse -File |
+        Where-Object { $_.Extension -in '.map', '.ts' } |
+        Remove-Item -Force
+
+    $gz = Join-Path $simBin 'cards.json.gz'
+    if (-not (Test-Path $gz)) {
+        Write-Host 'Sim: база карт' -ForegroundColor Cyan
+        $rawGz = Join-Path $src 'cards.json.gz'
+        $rawJs = Join-Path $cache 'cards.json'
+        if (Test-Path $rawGz) {
+            Copy-Item $rawGz $gz
+        }
+        else {
+            if (-not (Test-Path $rawJs)) {
+                foreach ($url in 'https://static.firestoneapp.com/data/cards/no_audio/cards_enUS.gz.json',
+                                 'https://static.zerotoheroes.com/data/cards/no_audio/cards_enUS.gz.json') {
+                    try {
+                        Invoke-WebRequest $url -OutFile $rawJs -TimeoutSec 180
+                        break
+                    } catch { Write-Warning "  не скачалось: $url" }
+                }
+                if (-not (Test-Path $rawJs)) { throw 'базу карт скачать не удалось' }
+            }
+            $in  = [System.IO.File]::OpenRead($rawJs)
+            $out = [System.IO.File]::Create($gz)
+            $zip = New-Object System.IO.Compression.GzipStream($out, [System.IO.Compression.CompressionMode]::Compress)
+            $in.CopyTo($zip); $zip.Dispose(); $out.Dispose(); $in.Dispose()
+        }
+    }
+
+    $node = Join-Path $simBin 'node.exe'
+    if (-not (Test-Path $node)) {
+        Write-Host 'Sim: node.exe' -ForegroundColor Cyan
+        $cached = Join-Path $cache 'node.exe'
+        if (-not (Test-Path $cached)) {
+            $ver = 'v24.22.2'
+            $zip = Join-Path $cache 'node.zip'
+            Invoke-WebRequest "https://nodejs.org/dist/$ver/node-$ver-win-x64.zip" -OutFile $zip -TimeoutSec 300
+            Expand-Archive $zip $cache -Force
+            Copy-Item (Join-Path $cache "node-$ver-win-x64\node.exe") $cached
+            Remove-Item $zip, (Join-Path $cache "node-$ver-win-x64") -Recurse -Force
+        }
+        Copy-Item $cached $node
+    }
+    Write-Host "  -> bin\sim ($([math]::Round(((Get-ChildItem $simBin -Recurse -File | Measure-Object Length -Sum).Sum) / 1MB, 1)) MB)"
+}
+
 if (-not $SkipNative) { Build-Native }
+
+if (-not $SkipSim) { Build-Sim }
 
 if (-not $SkipInjector) {
     Write-Host 'Injector: dotnet publish' -ForegroundColor Cyan
@@ -143,6 +216,10 @@ if ($Package) {
 
     Copy-Item $dll $stage
     Copy-Item (Join-Path $root 'package\README.txt') $stage
+    $simBin = Join-Path $bin 'sim'
+    if (Test-Path (Join-Path $simBin 'server.mjs')) {
+        Copy-Item $simBin (Join-Path $stage 'sim') -Recurse
+    }
     Compress-Archive -Path (Join-Path $stage '*') -DestinationPath "$stage.zip" -Force
     Write-Host "  -> dist\$name.zip ($([math]::Round((Get-Item "$stage.zip").Length / 1MB, 1)) MB)"
 }

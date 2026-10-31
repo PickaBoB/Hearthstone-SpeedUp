@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using BgOverlay;
 
 namespace GameSpeed;
 
@@ -19,11 +20,15 @@ public sealed class MainForm : Form
     private readonly Label    _state  = new();
     private readonly Label    _actual = new();
     private readonly Button[] _presetButtons = new Button[Presets.Length];
+    private readonly Button[] _hotkeyButtons = new Button[Presets.Length];
+    private readonly Label    _hotkeyNote = new();
+    private int    _capturing = -1;
     private readonly System.Windows.Forms.Timer _poll = new();
 
     private SharedCtl? _ctl;
     private double _speed = 1.0;
     private bool   _userChose;
+    private BgOverlay.BattlegroundsPanel _bacon = null!;
     // A pid that refused injection (no rights, wrong bitness) is not retried
     // every tick; a restarted game gets a new pid and a fresh attempt.
     private int    _failedPid;
@@ -33,7 +38,7 @@ public sealed class MainForm : Form
         Text = "Hearthstone SpeedUp";
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(500, 640);
+        ClientSize = new Size(500, 700);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9f);
 
@@ -52,8 +57,12 @@ public sealed class MainForm : Form
         var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new Point(12, 6) };
         var speedTab = new TabPage("Скорость");
         var baconTab = new TabPage("Поля сражений");
-        var bacon = new BgOverlay.BattlegroundsPanel { Dock = DockStyle.Fill };
-        baconTab.Controls.Add(bacon);
+        _bacon = new BgOverlay.BattlegroundsPanel { Dock = DockStyle.Fill };
+        // The buttons over the game are a third way to pick a speed, beside
+        // the buttons here and the hotkeys: all three land in SetSpeed.
+        _bacon.SpeedPicked += v => { _userChose = true; SetSpeed(v); };
+        _bacon.CurrentSpeed = _speed;
+        baconTab.Controls.Add(_bacon);
         tabs.TabPages.Add(speedTab);
         tabs.TabPages.Add(baconTab);
         Controls.Add(tabs);
@@ -103,16 +112,47 @@ public sealed class MainForm : Form
         _actual.ForeColor = SystemColors.GrayText;
         _actual.Margin = new Padding(3, 8, 3, 0);
 
+        var hotkeyBox = new GroupBox { Text = "Горячие клавиши", Size = new Size(310, 172) };
+        var keys = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = Presets.Length,
+            Padding = new Padding(4),
+        };
+        keys.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34));
+        keys.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (int i = 0; i < Presets.Length; i++)
+        {
+            keys.Controls.Add(new Label
+            {
+                Text = $"x{Presets[i]:0}", AutoSize = true, Anchor = AnchorStyles.Left,
+                Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+            }, 0, i);
+            int slot = i;
+            var b = new Button { Dock = DockStyle.Fill, Margin = new Padding(3) };
+            b.Click += (_, _) => BeginCapture(slot);
+            b.KeyDown += (_, e) => CaptureKey(e);
+            b.LostFocus += (_, _) => { if (_capturing == slot) EndCapture(); };
+            _hotkeyButtons[i] = b;
+            keys.Controls.Add(b, 1, i);
+        }
+        hotkeyBox.Controls.Add(keys);
+
+        _hotkeyNote.AutoSize = false;
+        _hotkeyNote.Size = new Size(310, 32);
+        _hotkeyNote.ForeColor = SystemColors.GrayText;
+        _hotkeyNote.Margin = new Padding(3, 2, 3, 0);
+
         var help = new Label
         {
             AutoSize = false, Size = new Size(310, 50),
             ForeColor = SystemColors.GrayText,
             Text = "Ускоряются только бой и розыгрыш, остальное идёт как обычно.\n"
-                 + "Горячие клавиши: Ctrl+Alt+1..4 — x1, x2, x3, x8.",
+                 + "Сменить сочетание: нажмите его кнопку, затем новые клавиши; Esc — отмена.",
             Margin = new Padding(3, 8, 3, 0),
         };
 
-        panel.Controls.AddRange(new Control[] { _target, _state, speedBox, _actual, help });
+        panel.Controls.AddRange(new Control[] { _target, _state, speedBox, hotkeyBox, _hotkeyNote, _actual, help });
+        ShowHotkeys();
     }
 
     // ---- attaching ---------------------------------------------------
@@ -192,6 +232,7 @@ public sealed class MainForm : Form
                 // Hooked by an earlier run of this window: take over, keeping
                 // the game's speed unless a preset was picked already.
                 if (!_userChose) _speed = _ctl.Multiplier;
+                _bacon.CurrentSpeed = _speed;
                 Publish();
                 HighlightPreset();
             }
@@ -232,6 +273,7 @@ public sealed class MainForm : Form
     private void SetSpeed(double v)
     {
         _speed = v;
+        _bacon.CurrentSpeed = v;
         Publish();
         HighlightPreset();
     }
@@ -296,14 +338,116 @@ public sealed class MainForm : Form
 
     // ---- hotkeys -----------------------------------------------------
 
-    private void RegisterHotkeys()
+    // The chords live in the settings as Win32 modifier flags and virtual-key
+    // codes; an edited or truncated settings file falls back to Ctrl+Alt+1..4.
+    private static int HotkeyMod(int i) =>
+        Settings.Current.SpeedHotkeyMods.Length > i ? Settings.Current.SpeedHotkeyMods[i]
+                                                    : Native.MOD_CONTROL | Native.MOD_ALT;
+    private static int HotkeyKey(int i) =>
+        Settings.Current.SpeedHotkeyKeys.Length > i ? Settings.Current.SpeedHotkeyKeys[i]
+                                                    : (int)Keys.D1 + i;
+
+    /// <summary>Both arrays at exactly one entry per preset, ready to write into.</summary>
+    private static void EnsureHotkeys()
+    {
+        var s = Settings.Current;
+        int[] mods = Enumerable.Range(0, Presets.Length).Select(HotkeyMod).ToArray();
+        int[] keys = Enumerable.Range(0, Presets.Length).Select(HotkeyKey).ToArray();
+        s.SpeedHotkeyMods = mods;
+        s.SpeedHotkeyKeys = keys;
+    }
+
+    private static string ComboText(int mods, int key)
+    {
+        var parts = new List<string>(4);
+        if ((mods & Native.MOD_CONTROL) != 0) parts.Add("Ctrl");
+        if ((mods & Native.MOD_ALT) != 0) parts.Add("Alt");
+        if ((mods & Native.MOD_SHIFT) != 0) parts.Add("Shift");
+        if ((mods & Native.MOD_WIN) != 0) parts.Add("Win");
+        var k = (Keys)key;
+        parts.Add(k switch
+        {
+            >= Keys.D0 and <= Keys.D9         => ((char)('0' + key - (int)Keys.D0)).ToString(),
+            >= Keys.NumPad0 and <= Keys.NumPad9 => "Num " + (key - (int)Keys.NumPad0),
+            _                                 => k.ToString(),
+        });
+        return string.Join("+", parts);
+    }
+
+    private void ShowHotkeys()
     {
         for (int i = 0; i < Presets.Length; i++)
+            _hotkeyButtons[i].Text = ComboText(HotkeyMod(i), HotkeyKey(i));
+    }
+
+    private void BeginCapture(int slot)
+    {
+        EndCapture();
+        _capturing = slot;
+        _hotkeyNote.Text = "";
+        _hotkeyButtons[slot].Text = "нажмите сочетание…";
+    }
+
+    private void EndCapture()
+    {
+        _capturing = -1;
+        ShowHotkeys();
+    }
+
+    private void CaptureKey(KeyEventArgs e)
+    {
+        if (_capturing < 0) return;
+        e.SuppressKeyPress = true;
+        Keys code = e.KeyData & Keys.KeyCode;
+        if (code == Keys.Escape) { EndCapture(); return; }
+        // A modifier alone is not a chord yet: keep waiting for the key itself.
+        if (code is Keys.ShiftKey or Keys.ControlKey or Keys.Menu
+                 or Keys.LShiftKey or Keys.RShiftKey or Keys.LControlKey or Keys.RControlKey
+                 or Keys.LMenu or Keys.RMenu or Keys.LWin or Keys.RWin)
+            return;
+        int mods = (e.Alt ? Native.MOD_ALT : 0)
+                 | (e.Control ? Native.MOD_CONTROL : 0)
+                 | (e.Shift ? Native.MOD_SHIFT : 0);
+        if (mods == 0)
         {
-            // Ctrl+Alt+1..4; a failure here is not worth blocking startup.
-            Native.RegisterHotKey(Handle, 100 + i,
-                Native.MOD_CONTROL | Native.MOD_ALT, (int)Keys.D1 + i);
+            _hotkeyNote.Text = "Нужны Ctrl, Alt или Shift — одиночная клавиша мешала бы игре.";
+            return;
         }
+        AssignHotkey(_capturing, mods, (int)code);
+    }
+
+    private void AssignHotkey(int slot, int mods, int key)
+    {
+        for (int j = 0; j < Presets.Length; j++)
+        {
+            if (j != slot && HotkeyMod(j) == mods && HotkeyKey(j) == key)
+            {
+                _hotkeyNote.Text = $"{ComboText(mods, key)} уже назначено на x{Presets[j]:0}.";
+                EndCapture();
+                return;
+            }
+        }
+        EnsureHotkeys();
+        Settings.Current.SpeedHotkeyMods[slot] = mods;
+        Settings.Current.SpeedHotkeyKeys[slot] = key;
+        Settings.Current.Save();
+        EndCapture();
+        RegisterHotkeys();
+    }
+
+    private void RegisterHotkeys()
+    {
+        var failed = new List<string>();
+        for (int i = 0; i < Presets.Length; i++)
+        {
+            Native.UnregisterHotKey(Handle, 100 + i);
+            // A chord another program owns simply does not register; the
+            // preset keeps working from the window and the strip over the game.
+            if (!Native.RegisterHotKey(Handle, 100 + i, HotkeyMod(i), HotkeyKey(i)))
+                failed.Add(ComboText(HotkeyMod(i), HotkeyKey(i)));
+        }
+        _hotkeyNote.Text = failed.Count == 0 ? "" :
+            "Не назначилось — занято другой программой: " + string.Join(", ", failed);
     }
 
     protected override void WndProc(ref Message m)
