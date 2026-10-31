@@ -754,7 +754,10 @@ public sealed class PowerLogParser
             Entity e = Get(int.Parse(b.Groups[2].Value));
             string name = b.Groups[1].Value;
             if (name.Length > 0 && !name.StartsWith("UNKNOWN", StringComparison.Ordinal)) e.Name = name;
-            if (b.Groups[5].Value.Length > 0) e.CardId = b.Groups[5].Value;
+            // A bracket's cardId lags a CHANGE_ENTITY that has just replaced
+            // the card (a paid hero reroll keeps the entity id), so it only
+            // fills in a card we have not seen yet, like the zone below.
+            if (e.CardId.Length == 0 && b.Groups[5].Value.Length > 0) e.CardId = b.Groups[5].Value;
             // A bracket shows what the client displays, which trails the
             // GameState tags (a removed copy still reads zone=PLAY), so it
             // only fills in entities not seen yet.
