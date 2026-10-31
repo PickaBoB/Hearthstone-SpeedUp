@@ -17,12 +17,13 @@
 
 ## Скачать и запустить
 
-1. Откройте [Releases](https://github.com/PickaBoB/HearthstoneSpeedUp/releases/latest)
-   и скачайте `HearthstoneSpeedUp-v….zip`.
-2. Распакуйте в любую папку. Файлы `HearthstoneSpeedUp.exe` и
-   `gsunity64.dll` должны лежать рядом.
+1. Скачайте [HearthstoneSpeedUp-v1.0.6.zip](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/download/v1.0.6/HearthstoneSpeedUp-v1.0.6.zip)
+   или откройте [последний релиз](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/latest).
+2. Распакуйте архив в отдельную папку. Оставьте вместе
+   `HearthstoneSpeedUp.exe`, `gsunity64.dll` и папку `sim\` — она нужна для
+   точного расчёта боёв.
 3. Запустите `HearthstoneSpeedUp.exe` — до игры или после, неважно.
-   .NET устанавливать не нужно, всё уже внутри.
+   .NET и Node.js устанавливать не нужно, всё уже внутри.
 4. Дождитесь надписи «Подключено» и выберите скорость. Скорость можно
    переключать и прямо в игре: кнопки **x1 · x2 · x3 · x8** в правом нижнем
    углу (отключаются во вкладке «Поля сражений»).
@@ -47,12 +48,11 @@
 * **при выборе героя и аксессуаров** — ранг каждого варианта и среднее место
   по статистике [Firestone](https://www.firestoneapp.com) (данные качаются сами,
   срез по рейтингу выбирается в окне);
-* **в бою** — шанс победы, ничьей и поражения. Цифра не дёргается по ходу
-  драки: считается один раз по доскам на поле. В соло она на экране сразу;
-  в дуэтах — с момента, когда на поле выходит вторая доска соперников, и
-  тогда в счёт идёт весь оставшийся бой целиком: доски на поле плюс ещё
-  не вышедшая доска нашей команды. Считает полный
-  симулятор боёв от [Firestone](https://www.firestoneapp.com): он проигрывает
+* **в бою** — шансы победы, ничьей и поражения в трёх цветных колонках.
+  Расклад не дёргается по ходу драки: считается один раз по доскам на поле.
+  В соло он на экране сразу; в дуэтах — с момента, когда на поле выходит
+  вторая доска соперников, и тогда учитывается весь оставшийся бой целиком.
+  Полный симулятор боёв от [Firestone](https://www.firestoneapp.com) проигрывает
   бой тысячи раз по скриптам карт — предсмертные хрипы, перерождения,
   божественные щиты, яд и слиз, «месть», аксессуары, — а не только по
   ключевым словам. Сервис (`sim\` рядом с программой, Node.js в комплекте)
@@ -64,8 +64,20 @@
   номер хода — отдельной плашкой в правом верхнем углу. Над монетами справа
   показываются ненулевые усиления нежити, заклинаний таверны, жуков и
   кровавых самоцветов — с игровыми иконками и текущими значениями;
+* **при наведении на портрет соперника** — его последняя увиденная доска,
+  имя, таверна и оставшееся здоровье; в дуэтах показываются обе доски команды;
 * **между играми** — прошлые игры: место, герой, расы, изменение рейтинга;
   наведите курсор на строку, и покажется доска, с которой та игра закончилась.
+
+### Примеры оверлея
+
+**Шансы боя:**
+
+![Победа, ничья и поражение в блоке шансов боя](docs/combat-odds.png)
+
+**Усиления нежити, заклинаний таверны, жуков и кровавых самоцветов:**
+
+![Индикаторы активных баффов](docs/buffs.png)
 
 Рейтинг Полей сражений игра никуда не пишет, поэтому он читается из памяти
 клиента тем же модулем, что отвечает за ускорение: без него всё остальное
@@ -91,7 +103,7 @@
 
 **Ускорение не включается.**
 Перезапустите игру и программу. Если не помогло — приложите к
-[issue](https://github.com/PickaBoB/HearthstoneSpeedUp/issues) лог
+[issue](https://github.com/PickaBoB/Hearthstone-SpeedUp/issues) лог
 `%TEMP%\gsunity_<номер процесса>.log` (вставьте `%TEMP%` в адресную строку
 проводника).
 
@@ -125,11 +137,12 @@ Hearthstone написан на Unity и сам управляет скорос�
 
 ## Сборка из исходников
 
-Нужны **.NET 8 SDK** и **Zig** (компилятор C, ~80 МБ):
+Нужны **.NET 8 SDK**, **Zig** (компилятор C, ~80 МБ) и **Node.js** с npm:
 
 ```
 winget install -e --id Microsoft.DotNet.SDK.8
 winget install -e --id zig.zig
+winget install -e --id OpenJS.NodeJS
 ```
 
 Сборка всего в `bin\`:
@@ -138,10 +151,14 @@ winget install -e --id zig.zig
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-Релизный архив, как в Releases (самодостаточный exe + DLL), в `dist\`:
+Скрипт сам скачает базу карт и положит портативный Node.js в пакет. Если
+симулятор боёв не нужен, можно собрать с `-SkipSim`; оверлей тогда покажет
+только быструю приблизительную оценку.
+
+Релизный архив, как в Releases (самодостаточный exe + DLL + симулятор), в `dist\`:
 
 ```
-powershell -ExecutionPolicy Bypass -File build.ps1 -Package -Version 1.0.0
+powershell -ExecutionPolicy Bypass -File build.ps1 -Package -Version 1.0.6
 ```
 
 Диагностика без внедрения — что видно про запущенную игру:
@@ -158,6 +175,7 @@ src/hook/gsphook.c         модуль часов ОС (для консольн
 src/injector/              окно и консольный режим (WinForms, .NET 8)
 src/bgoverlay/             вкладка «Поля сражений»: разбор Power.log, статистика,
                            отрисовка поверх игры — собирается в тот же exe
+sim/                       локальный сервис полного симулятора боёв Firestone
 src/testtarget/testclock.c тестовая мишень для модуля часов
 package/README.txt         инструкция, которая кладётся в архив релиза
 build.ps1                  сборка и упаковка
@@ -172,12 +190,20 @@ docs/TECHNICAL.md          техническое описание
 Speeds up **Battlegrounds combat** and **played-out actions** (card plays,
 attacks, triggers) in Hearthstone while the leaderboard, tavern minions and
 card hovering keep their normal pace. Presets x1 / x2 / x3 / x8,
-Ctrl+Alt+1..4 in game.
+Ctrl+Alt+1..4 in game, with remappable hotkeys and optional in-game speed buttons.
+
+The Battlegrounds overlay also provides:
+
+- hero and trinket ratings from Firestone statistics;
+- win, tie and loss chances from the full Firestone combat simulator, including Duos;
+- undead, Tavern spell, Beetle and Blood Gem buff indicators with card art;
+- opponent boards on leaderboard hover, lobby information and past-game history.
 
 Download the zip from
-[Releases](https://github.com/PickaBoB/HearthstoneSpeedUp/releases/latest),
-unzip, keep `HearthstoneSpeedUp.exe` and `gsunity64.dll` together, run the
-exe. It finds and attaches to Hearthstone by itself; no .NET install needed.
+[Releases](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/latest),
+unzip, and keep `HearthstoneSpeedUp.exe`, `gsunity64.dll` and the `sim` folder
+together. Run the exe; it finds and attaches to Hearthstone by itself. Neither
+.NET nor Node.js needs to be installed.
 
 It injects a small module that sets the multiplier of the game's own
 `TimeScaleMgr` through the embedded Mono runtime, only while the client is
