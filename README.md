@@ -17,13 +17,15 @@
 
 ## Скачать и запустить
 
-1. Скачайте [HearthstoneSpeedUp-v1.0.6.zip](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/download/v1.0.6/HearthstoneSpeedUp-v1.0.6.zip)
+1. Скачайте [HearthstoneSpeedUp-v1.0.7.zip](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/download/v1.0.7/HearthstoneSpeedUp-v1.0.7.zip)
    или откройте [последний релиз](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/latest).
 2. Распакуйте архив в отдельную папку. Оставьте вместе
    `HearthstoneSpeedUp.exe`, `gsunity64.dll` и папку `sim\` — она нужна для
    точного расчёта боёв.
 3. Запустите `HearthstoneSpeedUp.exe` — до игры или после, неважно.
-   .NET и Node.js устанавливать не нужно, всё уже внутри.
+   .NET и Node.js устанавливать не нужно, всё уже внутри. Если игра уже
+   была открыта при первом запуске программы, перезапустите её: оверлею
+   нужен `Power.log`, а игра включает его запись только при запуске.
 4. Дождитесь надписи «Подключено» и выберите скорость. Скорость можно
    переключать и прямо в игре: кнопки **x1 · x2 · x3 · x8** в правом нижнем
    углу (отключаются во вкладке «Поля сражений»).
@@ -158,7 +160,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 Релизный архив, как в Releases (самодостаточный exe + DLL + симулятор), в `dist\`:
 
 ```
-powershell -ExecutionPolicy Bypass -File build.ps1 -Package -Version 1.0.6
+powershell -ExecutionPolicy Bypass -File build.ps1 -Package -Version 1.0.7
 ```
 
 Диагностика без внедрения — что видно про запущенную игру:

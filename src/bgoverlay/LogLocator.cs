@@ -48,6 +48,26 @@ internal static class LogLocator
             : DateTime.Now;
     }
 
+    /// <summary>
+    /// Whether this log belongs to the running client, rather than to a previous
+    /// launch that had logging enabled. A flat log has no session folder, so its
+    /// last write is the only timestamp available.
+    /// </summary>
+    public static bool IsCurrentSession(string logPath, int processId)
+    {
+        try
+        {
+            using Process game = Process.GetProcessById(processId);
+            string name = Path.GetFileName(Path.GetDirectoryName(logPath) ?? "") ?? "";
+            if (!DateTime.TryParseExact(name, "'Hearthstone_'yyyy_MM_dd_HH_mm_ss",
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out DateTime started))
+                started = File.GetLastWriteTime(logPath);
+            return started >= game.StartTime.AddMinutes(-2);
+        }
+        catch { return true; }
+    }
+
     private static string? FindInstallDir()
     {
         foreach (Process p in Process.GetProcessesByName("Hearthstone"))

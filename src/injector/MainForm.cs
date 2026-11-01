@@ -108,7 +108,7 @@ public sealed class MainForm : Form
         speedBox.Controls.Add(row);
 
         _actual.AutoSize = false;
-        _actual.Size = new Size(310, 40);
+        _actual.Size = new Size(310, 58);
         _actual.ForeColor = SystemColors.GrayText;
         _actual.Margin = new Padding(3, 8, 3, 0);
 
@@ -333,7 +333,8 @@ public sealed class MainForm : Form
         string phase = hs.HasFlag(SharedCtl.HsState.Selective)
             ? (hs.HasFlag(SharedCtl.HsState.Fast) ? "идёт действие" : "простой, x1")
             : "";
-        _actual.Text = $"Сейчас: x{_ctl.Actual:0.00}" + (phase.Length > 0 ? $"  ({phase})" : "");
+        _actual.Text = $"Сейчас: x{_ctl.Actual:0.00}" + (phase.Length > 0 ? $"  ({phase})" : "")
+            + (_bacon.OverlayNotice.Length > 0 ? "\n" + _bacon.OverlayNotice : "");
     }
 
     // ---- hotkeys -----------------------------------------------------

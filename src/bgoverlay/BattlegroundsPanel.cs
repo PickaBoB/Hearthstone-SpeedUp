@@ -62,6 +62,9 @@ internal sealed class BattlegroundsPanel : UserControl
     /// <summary>The speed the main window has in force; the strip lights it.</summary>
     public double CurrentSpeed { get; set; } = 1.0;
 
+    /// <summary>A missing-log warning, also shown on the main speed tab.</summary>
+    public string OverlayNotice { get; private set; } = "";
+
     /// <summary>A speed button over the game was clicked.</summary>
     public event Action<double>? SpeedPicked;
 
@@ -290,9 +293,10 @@ internal sealed class BattlegroundsPanel : UserControl
         if (!snap.InBattlegrounds && _rating.Known)
             _history.SettleRating(_rating.Of(_history.Games.Count > 0 && _history.Games[0].IsDuo),
                 _history.Games.Count > 0 && _history.Games[0].IsDuo, TimeSpan.FromMinutes(20));
-        UpdateStatus(snap);
 
         IntPtr hs = FindGameWindow();
+        OverlayNotice = LogNotice(hs);
+        UpdateStatus(snap);
         bool up = hs != IntPtr.Zero && !Native.IsIconic(hs) && Native.IsWindowVisible(hs);
         Rectangle client = up ? ClientRect(hs) : Rectangle.Empty;
         bool front = false;
@@ -411,6 +415,7 @@ internal sealed class BattlegroundsPanel : UserControl
             sb.Append(c.Id).Append(c.Kind);
             foreach (var o in c.Options) sb.Append(',').Append(o.EntityId).Append(o.CardId);
         }
+        sb.Append('|').Append(OverlayNotice);
         return sb.ToString();
     }
 
@@ -418,6 +423,10 @@ internal sealed class BattlegroundsPanel : UserControl
     {
         if (_preview.SelectedIndex > 0)
             return OverlayForm.Sample(_preview.SelectedIndex == 1 ? ChoiceKind.Hero : ChoiceKind.LesserTrinket);
+        if (OverlayNotice.Length > 0)
+            return new OverlayModel(null, [], "", Banner: new WinBanner(true,
+                "Перезапустите Hearthstone", "Оверлею нужен Power.log текущего запуска игры",
+                null, null, null));
         // Out of a game the screen is free: show how the last ones went.
         if (!snap.InBattlegrounds)
             return BuildHistory() is { } past ? new OverlayModel(null, [], "", null, null, past) : null;
@@ -716,10 +725,22 @@ internal sealed class BattlegroundsPanel : UserControl
         return sb.ToString();
     }
 
+    private string LogNotice(IntPtr hs)
+    {
+        if (hs == IntPtr.Zero) return "";
+        string? path = _reader.CurrentPath;
+        return path is null || !LogLocator.IsCurrentSession(path, _hsProcess)
+            ? "Оверлей: перезапустите Hearthstone, чтобы включить Power.log."
+            : "";
+    }
+
     private void UpdateStatus(GameSnapshot snap)
     {
         string? path = _reader.CurrentPath;
-        if (path is null)
+        if (OverlayNotice.Length > 0)
+            _game.Text = "Нет Power.log текущего запуска.\n"
+                + (_configNote.Length > 0 ? _configNote : "Перезапустите Hearthstone.");
+        else if (path is null)
             _game.Text = "Не нашёл Power.log. Запустите Hearthstone." + (_configNote.Length > 0 ? "\n" + _configNote : "");
         else if (_reader.CatchingUp)
             _game.Text = "Читаю лог текущего запуска игры…";
