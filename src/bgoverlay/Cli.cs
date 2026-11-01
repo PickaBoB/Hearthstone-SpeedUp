@@ -425,7 +425,9 @@ internal static class Cli
         Console.WriteLine("   Таблица игроков:");
         foreach (LobbyPlayer p in lobby)
             Console.WriteLine($"     {p.Place}. {p.Hero}{(p.Friendly ? " (свои)" : "")}"
-                + $"{(p.Alive ? "" : " — выбыл")}"
+                + $"{(p.Alive ? "" : " — выбыл")}  таверна {p.Tier}"
+                + (p.Tavern is { Count: > 0 } tavern
+                    ? $" ({string.Join(", ", tavern.Select(t => $"{t.Level}↗{t.Turn}"))})" : "")
                 + (p.Board is { } b ? $"  доска с хода {b.Turn}: {b.Stats} ат.+зд." : "  доски не видели"));
     }
 

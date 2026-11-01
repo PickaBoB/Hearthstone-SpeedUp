@@ -48,7 +48,6 @@ internal sealed class BattlegroundsPanel : UserControl
     private string _lastKey = "";
     private int _hoverRow = -1;
     private int _peekSlot = -1;
-    private float _clientHeight = 1080;
     private int _hsProcess;
     private int _ratingBefore;
     private bool _wasInGame;
@@ -282,6 +281,8 @@ internal sealed class BattlegroundsPanel : UserControl
             _ = LoadStats(force: false);
         }
 
+        IntPtr hs = FindGameWindow();
+        _reader.Parser.ScreenActive(hs != IntPtr.Zero && !Native.IsIconic(hs));
         GameSnapshot snap = _reader.Parser.Snapshot();
         _rating.Poll(_hsProcess);
         _lobbyNames.Poll(_hsProcess);
@@ -294,7 +295,6 @@ internal sealed class BattlegroundsPanel : UserControl
             _history.SettleRating(_rating.Of(_history.Games.Count > 0 && _history.Games[0].IsDuo),
                 _history.Games.Count > 0 && _history.Games[0].IsDuo, TimeSpan.FromMinutes(20));
 
-        IntPtr hs = FindGameWindow();
         OverlayNotice = LogNotice(hs);
         UpdateStatus(snap);
         bool up = hs != IntPtr.Zero && !Native.IsIconic(hs) && Native.IsWindowVisible(hs);
@@ -311,7 +311,6 @@ internal sealed class BattlegroundsPanel : UserControl
         // itself never takes it: the cursor's place is all it needs.
         _hoverRow = show && !snap.InBattlegrounds ? HoverRow(client) : -1;
         _peekSlot = show && snap.InBattlegrounds ? HoverPortrait(client, snap) : -1;
-        if (client.Height > 0) _clientHeight = client.Height;
 
         string key = Key(snap);
         if (key != _lastKey || (snap.InCombat && snap.CombatWaiting))
@@ -399,7 +398,8 @@ internal sealed class BattlegroundsPanel : UserControl
           .Append(CurrentSession()).Append('|')
           .Append(_art.Version).Append('|').Append(_peekSlot).Append('|')
           .Append(string.Join(",", (s.Seen ?? []).Select(b => $"{b.PlayerId}:{b.Turn}:{b.Stats}"))).Append('|')
-          .Append(string.Join(",", (s.Lobby ?? []).Select(p => p.PlayerName))).Append('|')
+          .Append(string.Join(",", (s.Lobby ?? []).Select(p =>
+              $"{p.PlayerName}:{p.Tier}:{string.Join(".", (p.Tavern ?? []).Select(t => $"{t.Level}={t.Turn}"))}"))).Append('|')
           .Append(s.IsDuo).Append('|').Append(s.TribesConfident).Append('|')
           .Append(string.Join(",", s.Tribes)).Append('|');
         sb.Append(s.InBattlegrounds).Append('|').Append(s.MyHeroCardId).Append(s.MyHeroName).Append('|')
@@ -433,10 +433,11 @@ internal sealed class BattlegroundsPanel : UserControl
 
         // The turn, for the corner plate: the game shows it nowhere itself.
         string turn = snap.Turn > 0 ? $"Ход {snap.Turn}" : "";
-        WinBanner? banner = BuildBanner(snap);
+        var peekNow = BuildPeek(snap);
+        // The hovered board takes the combat banner's place until the pointer leaves.
+        WinBanner? banner = peekNow is null ? BuildBanner(snap) : null;
         // The hero pick has its own badges and no hero to describe yet.
         var panel = snap.Choice?.Kind == ChoiceKind.Hero ? null : BuildPanel(snap);
-        var peekNow = BuildPeek(snap);
         var buffs = snap.InCombat ? null : snap.Buffs;
         if (snap.Choice is null) return new OverlayModel(null, [], "", panel, banner, null, peekNow, turn, buffs);
 
@@ -485,35 +486,10 @@ internal sealed class BattlegroundsPanel : UserControl
             var h = s.Hero;
             lines.Add(PanelLine.Title(h.Option.Name, h.Tier, OverlayForm.TierColor(h.Tier),
                 snap.MyHeroCardId ?? ""));
-            if (h.AvgPlace is double p)
-                lines.Add(PanelLine.Pair("Среднее место", $"{p:0.00}", Color.White));
         }
-
-        lines.Add(PanelLine.Section(snap.BoardMinions > 0
-            ? $"Доска · {Minions(snap.BoardMinions)}"
-            : "Доска"));
-        if (snap.BoardMinions > 0)
+        else if (snap.MyHeroCardId is { Length: > 0 } heroCard)
         {
-            Color ink = Color.White;
-            if (s?.AvgWarbandThisTurn is double avg && avg > 0)
-            {
-                double ratio = snap.BoardStats / avg;
-                ink = ratio >= 1.15 ? OverlayForm.Good : ratio <= 0.85 ? OverlayForm.Bad : Color.White;
-                lines.Add(PanelLine.Pair("Ваши статы", $"{snap.BoardStats}", ink));
-                lines.Add(PanelLine.Pair("Средние на ходу", $"{avg:0}", Color.White));
-                double difference = Math.Round((ratio - 1) * 100);
-                string comparison = Math.Abs(difference) < 1 ? "на уровне средней"
-                    : $"на {Math.Abs(difference):0}% {(difference > 0 ? "выше" : "ниже")} средней";
-                lines.Add(PanelLine.Note(comparison, Muted));
-            }
-            else
-            {
-                lines.Add(PanelLine.Pair("Атака + здоровье", $"{snap.BoardStats}", ink));
-            }
-        }
-        else
-        {
-            lines.Add(PanelLine.Note("Пока нет существ", Muted));
+            lines.Add(PanelLine.Title(snap.MyHeroName ?? heroCard, "?", OverlayForm.TierColor("?"), heroCard));
         }
 
         AddTribes(lines, snap);
@@ -526,16 +502,12 @@ internal sealed class BattlegroundsPanel : UserControl
         lines.Add(PanelLine.Note(snap.Tribes.Count > 0
             ? string.Join(", ", snap.Tribes.Select(Tribes.Name)) + (snap.TribesConfident ? "" : " (пока не все)")
             : "Пока не определены", Muted));
-    }
 
-    /// <summary>"7 существ", with the ending the number asks for.</summary>
-    private static string Minions(int n)
-    {
-        int tail = n % 10, teen = n % 100;
-        return n + " " + (teen is >= 11 and <= 14 ? "существ"
-            : tail == 1 ? "существо"
-            : tail is >= 2 and <= 4 ? "существа"
-            : "существ");
+        lines.Add(PanelLine.Section("Забанены"));
+        var banned = snap.TribesConfident ? Tribes.All.Except(snap.Tribes).Select(Tribes.Name).ToList() : [];
+        lines.Add(PanelLine.Note(snap.TribesConfident
+            ? string.Join(", ", banned)
+            : "Пока не определены", Muted));
     }
 
     // A session's worth of games; the strip is narrow enough to carry them.
@@ -552,25 +524,18 @@ internal sealed class BattlegroundsPanel : UserControl
 
         var boards = lobby
             .Where(p => p.Place == place)
-            .Select(p =>
-            {
-                string? nick = p.PlayerName ?? _lobbyNames.Of(p.PlayerId);
-                return new PeekBoard(
-                    $"{place}. " + (nick ?? p.Hero) + (p.Tier > 0 ? $"  ★{p.Tier}" : ""),
-                    p.HeroCard,
-                    (nick is null ? "" : p.Hero + " · ") + (p.Board is { } b
-                        ? $"ход {b.Turn} · {b.Stats} ат.+зд. · {b.Hp} зд."
-                        : "доску ещё не видели"),
-                    !p.Alive ? Color.FromArgb(132, 138, 155)
-                        : p.Friendly ? OverlayForm.Good : Color.White,
-                    p.Board is { } board
-                        ? board.Board.Select(m => new BoardCard(m.CardId, m.Name, $"{m.Attack}/{m.Health}",
-                            Marks(m), MarkInk(m))).ToList()
-                        : Array.Empty<BoardCard>());
-            })
+            .Select(p => new PeekBoard(
+                p.HeroCard,
+                !p.Alive ? Color.FromArgb(132, 138, 155)
+                    : p.Friendly ? OverlayForm.Good : Color.White,
+                p.Board is { } board
+                    ? board.Board.Select(m => new BoardCard(m.CardId, m.Name, $"{m.Attack}/{m.Health}",
+                        Marks(m), MarkInk(m))).ToList()
+                    : Array.Empty<BoardCard>(),
+                p.Tier,
+                p.Tavern ?? Array.Empty<TavernTier>()))
             .ToList();
-        return boards.Count == 0 ? null
-            : new BoardPeek(OverlayForm.PeekRowCenter(_peekSlot, Slots(snap), _clientHeight), boards);
+        return boards.Count == 0 ? null : new BoardPeek(boards);
     }
 
     private static string Marks(SeenMinion m)

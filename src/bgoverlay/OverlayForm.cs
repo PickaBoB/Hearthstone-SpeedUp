@@ -39,11 +39,11 @@ public sealed record HistoryPanel(string Title, string Note, IReadOnlyList<Histo
 public sealed record BoardCard(string CardId, string Name, string Stats, string Marks, Color MarkInk);
 
 /// <summary>One board under the pointer, laid out the way the game lays it.</summary>
-public sealed record PeekBoard(string Title, string HeroCard, string Note, Color Ink,
-    IReadOnlyList<BoardCard> Board);
+public sealed record PeekBoard(string HeroCard, Color Ink,
+    IReadOnlyList<BoardCard> Board, int Tier, IReadOnlyList<TavernTier> Tavern);
 
-/// <summary>What to show beside the leaderboard portrait being hovered.</summary>
-public sealed record BoardPeek(float AtY, IReadOnlyList<PeekBoard> Boards);
+/// <summary>The boards and tavern progress to show over the play area.</summary>
+public sealed record BoardPeek(IReadOnlyList<PeekBoard> Boards);
 
 public sealed record WinBanner(bool Waiting, string Title, string Sub, double? Win, double? Tie, double? Lose,
     string Team = "", double? TeamWin = null);
@@ -524,80 +524,98 @@ internal sealed class OverlayForm : Form
     private static float Step(int slots, float h) =>
         (float)(Settings.Current.PeekSpan * h / Math.Max(slots, 1));
 
-    /// <summary>The middle of a leaderboard portrait, for lining a peek up with it.</summary>
-    internal static float PeekRowCenter(int slot, int slots, float h) =>
-        (float)(Settings.Current.PeekTop * h) + (slot + 0.5f) * Step(slots, h);
-
     /// <summary>
-    /// The board as it stood on the table: the minions as their own portraits
-    /// in a row, attack and health on them, the way the game draws it. The
-    /// backdrop is solid, so the rounded art never meets the colour key.
+    /// The hovered player's compact strip: hero, minions in the same row,
+    /// then a divider and all six tavern tiers. No player or board text.
     /// </summary>
-    /// <summary>The right edge of the leaderboard strip.</summary>
-    internal static float PeekRight(float h) =>
-        (float)((Settings.Current.PeekX + Settings.Current.PeekWidth) * h);
-
     private static void DrawPeek(Graphics g, BoardPeek peek, CardArt? art, Size size, float h)
     {
-        // No panel behind any of it: the portraits and the text sit straight
-        // on the game, the way its own interface would.
-        float oval = 0.054f * h, gap = 0.015f * h, line = 0.019f * h;
-        float portrait = 0.070f * h;          // the hero, as the leaderboard shows them
-        float rowH = line + oval * 1.12f + 0.010f * h;
-        float total = peek.Boards.Count * rowH;
-        float x = PlayLeft(size) + PeekRight(h) + 0.012f * h;
-        float y = Math.Max(0.010f * h, peek.AtY - total / 2);
-
-        using var heroFont = new Font("Segoe UI", 0.0140f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var noteFont = new Font("Segoe UI", 0.0120f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var left = new StringFormat(StringFormat.GenericTypographic)
-            { FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
+        float pad = 0.006f * h, content = 0.052f * h;
+        float portrait = 0.046f * h, oval = 0.044f * h, gap = 0.005f * h;
+        float tierCell = 0.041f * h, rowH = 2 * pad + content;
+        float y = (float)(Settings.Current.BannerY * h);
 
         SmoothingMode was = g.SmoothingMode;
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
-        float cy = y;
         foreach (PeekBoard board in peek.Boards)
         {
-            float bench = portrait + 0.012f * h;     // room for the hero's own face
-            float width = bench + Math.Max(1, board.Board.Count) * oval
-                        + Math.Max(0, board.Board.Count - 1) * gap;
-            SizeF hero = g.MeasureString(board.Title, heroFont, int.MaxValue, left);
-
-            // A soft oval backing, enough to lift the row off the table
-            // without the game disappearing behind it.
-            float pad = 0.016f * h;
-            SizeF note = g.MeasureString(board.Note, noteFont, int.MaxValue, left);
-            float back = Math.Max(width, bench + hero.Width + note.Width + 0.010f * h);
-            using (GraphicsPath pill = Pill(new RectangleF(x - pad, cy - 0.006f * h,
-                                                           back + 2 * pad, rowH - 0.002f * h), 0.024f * h))
+            int count = board.Board.Count;
+            float cardsWidth = count * oval + Math.Max(0, count - 1) * gap;
+            float width = 2 * pad + portrait + (count > 0 ? gap + cardsWidth : 0)
+                        + 0.014f * h + 6 * tierCell;
+            width = Math.Min(width, size.Width - 0.020f * h);
+            float x = (size.Width - width) / 2;
+            using (GraphicsPath frame = Pill(new RectangleF(x, y, width, rowH), 0.005f * h))
             {
-                using var fill = new SolidBrush(Color.FromArgb(196, 4, 5, 9));
-                using var rim = new Pen(Color.FromArgb(64, 190, 200, 225), Math.Max(1f, 0.0012f * h));
-                g.FillPath(fill, pill);
-                g.DrawPath(rim, pill);
+                using var fill = new SolidBrush(Back);
+                using var rim = new Pen(Frame, Math.Max(1f, 0.0012f * h));
+                g.FillPath(fill, frame);
+                g.DrawPath(rim, frame);
             }
-            // The hero's own face on the row, so a board is never read against
-            // the wrong player: in duos the two of a team swap places on the
-            // leaderboard depending on who fights next.
-            float py = cy + (rowH - portrait) / 2 - 0.002f * h;
-            DrawFace(g, board.HeroCard, art, new RectangleF(x, py, portrait, portrait), board.Ink, h);
 
-            Outlined(g, board.Title, heroFont, board.Ink,
-                new RectangleF(x + bench, cy, 0.30f * h, line), left, h);
-            Outlined(g, board.Note, noteFont, Muted,
-                new RectangleF(x + bench + hero.Width + 0.008f * h, cy + 0.002f * h, 0.30f * h, line), left, h);
+            float py = y + pad + (content - portrait) / 2;
+            DrawFace(g, board.HeroCard, art, new RectangleF(x + pad, py, portrait, portrait), board.Ink, h);
 
-            float bx = x + bench;
+            float bx = x + pad + portrait + (count > 0 ? gap : 0);
+            float by = y + pad + (content - oval * 1.12f) / 2;
             foreach (BoardCard card in board.Board)
             {
-                DrawMinion(g, card, art, new RectangleF(bx, cy + line, oval, oval * 1.12f), h);
+                DrawMinion(g, card, art, new RectangleF(bx, by, oval, oval * 1.12f), h);
                 bx += oval + gap;
             }
-            cy += rowH;
+
+            float split = bx + 0.006f * h;
+            using (var divider = new Pen(Edge, Math.Max(1f, 0.0012f * h)))
+                g.DrawLine(divider, split, y + pad + 0.005f * h,
+                    split, y + pad + content - 0.005f * h);
+
+            float tiersX = split + 0.008f * h;
+            for (int level = 1; level <= 6; level++)
+            {
+                TavernTier? reached = board.Tavern.FirstOrDefault(t => t.Level == level);
+                bool unlocked = level <= board.Tier || reached is not null;
+                DrawTavernTier(g, level, unlocked, reached?.Turn ?? 0,
+                    new RectangleF(tiersX + (level - 1) * tierCell, y + pad, tierCell, content), h);
+            }
+            y += rowH + 0.006f * h;
         }
 
         g.SmoothingMode = was;
+    }
+
+    /// <summary>A tavern shield, grey until reached, with its upgrade turn.</summary>
+    private static void DrawTavernTier(Graphics g, int level, bool unlocked, int turn, RectangleF cell, float h)
+    {
+        float w = 0.030f * h, sh = 0.036f * h;
+        float x = cell.X + (cell.Width - w) / 2, y = cell.Y + 0.001f * h;
+        PointF[] points =
+        {
+            new(x, y), new(x + w, y), new(x + w, y + sh * 0.56f),
+            new(x + w * 0.50f, y + sh), new(x, y + sh * 0.56f),
+        };
+        using (var shield = new GraphicsPath())
+        {
+            shield.AddPolygon(points);
+            using var fill = new SolidBrush(unlocked ? Color.FromArgb(112, 79, 39) : Color.FromArgb(39, 42, 50));
+            using var rim = new Pen(unlocked ? Color.FromArgb(224, 178, 91) : Color.FromArgb(82, 87, 98),
+                Math.Max(1f, 0.0012f * h));
+            g.FillPath(fill, shield);
+            g.DrawPath(rim, shield);
+        }
+
+        using var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        using var tierFont = new Font("Segoe UI", 0.0150f * h, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var tierInk = new SolidBrush(unlocked ? Ink : Dim);
+        g.DrawString(level.ToString(), tierFont, tierInk, new RectangleF(x, y, w, sh * 0.76f), center);
+
+        if (!unlocked) return;
+        using var turnFont = new Font("Segoe UI", 0.0095f * h, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var turnInk = new SolidBrush(Color.FromArgb(237, 196, 105));
+        using var right = new StringFormat(StringFormat.GenericTypographic)
+            { Alignment = StringAlignment.Far, FormatFlags = StringFormatFlags.NoWrap };
+        g.DrawString(turn > 0 ? $"↗{turn}" : "↗?", turnFont, turnInk,
+            new RectangleF(cell.X, cell.Y + 0.038f * h, cell.Width - 0.003f * h, 0.014f * h), right);
     }
 
     /// <summary>A round portrait of whatever card the id names.</summary>
@@ -708,8 +726,9 @@ internal sealed class OverlayForm : Form
         string atkText = parts[0];
         string hpText = parts.Length > 1 ? parts[1] : "";
         float digits = Math.Max(atkText.Length, hpText.Length);
-        float size = digits >= 5 ? 0.0100f * h : digits >= 4 ? 0.0118f * h
-                   : digits >= 3 ? 0.0145f * h : 0.0170f * h;
+        float size = (digits >= 5 ? 0.0100f * h : digits >= 4 ? 0.0118f * h
+                   : digits >= 3 ? 0.0145f * h : 0.0170f * h)
+                   * Math.Min(1f, box.Width / (0.054f * h));
         using var numFont = new Font("Segoe UI", size, FontStyle.Bold, GraphicsUnit.Pixel);
         using var left = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Near };
         using var rightEdge = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Far };
@@ -1029,13 +1048,10 @@ internal sealed class OverlayForm : Form
         var panel = new List<PanelLine>
         {
             PanelLine.Title("Вечная Токи", "B", TierColor("B"), "TB_BaconShop_HERO_28"),
-            PanelLine.Pair("Среднее место", "3,95", Ink),
-            PanelLine.Section("Доска · 7 существ"),
-            PanelLine.Pair("Ваши статы", "260", Good),
-            PanelLine.Pair("Средние на ходу", "215", Ink),
-            PanelLine.Note("на 21% выше средней", Muted),
             PanelLine.Section("Расы в лобби"),
             PanelLine.Note("Звери, Драконы, Нежить, Пираты, Демоны", Muted),
+            PanelLine.Section("Забанены"),
+            PanelLine.Note("Мурлоки, Механизмы, Элементали, Свинобразы, Наги, Аберрации", Muted),
         };
         var banner = new WinBanner(false, "30%", "420 против 310", 0.30, 0.60, 0.10,
             "с союзником 78%  ·  730 против 310", 0.78);
@@ -1094,12 +1110,12 @@ internal sealed class OverlayForm : Form
         };
         var cards = board.Select(b => new BoardCard(b.Card, b.Name, b.Stats, b.Marks,
             b.Marks.Contains("яд") ? Good : Muted)).ToList();
-        var peek = new BoardPeek(0.42f * 1080f,
+        var peek = new BoardPeek(
         [
-            new PeekBoard("2. ShadowFox  ★6", "TB_BaconShop_HERO_28",
-                "Вечная Токи · ход 13 · 15054 ат.+зд. · 5 зд.", Ink, cards),
-            new PeekBoard("2. NightWolf  ★5", "BG31_HERO_005",
-                "Клонист Зерек · ход 12 · 12754 ат.+зд. · 13 зд.", Ink, cards.Take(5).ToList()),
+            new PeekBoard("TB_BaconShop_HERO_28", Ink, cards, 6,
+                [new(1, 1), new(2, 2), new(3, 4), new(4, 6), new(5, 9), new(6, 11)]),
+            new PeekBoard("BG31_HERO_005", Ink, cards.Take(5).ToList(), 5,
+                [new(1, 1), new(2, 2), new(3, 4), new(4, 7), new(5, 10)]),
         ]);
         return new OverlayModel(null, [], "", null, null, null, peek);
     }

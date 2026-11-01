@@ -46,12 +46,16 @@ public sealed record GameOutcome(
     public int BoardStats => Board.Sum(m => m.Attack + Math.Max(0, m.Health));
 }
 
+/// <summary>A tavern tier and the shop turn on which the player reached it.</summary>
+public sealed record TavernTier(int Level, int Turn);
+
 /// <summary>
 /// A player in the lobby, in the order the game's leaderboard puts them:
 /// by place, best first. The board is there once we have fought them.
 /// </summary>
 public sealed record LobbyPlayer(int Place, int PlayerId, string Hero, string HeroCard,
-    bool Friendly, bool Alive, int Tier, SeenBoard? Board, string? PlayerName = null);
+    bool Friendly, bool Alive, int Tier, SeenBoard? Board, string? PlayerName = null,
+    IReadOnlyList<TavernTier>? Tavern = null);
 
 public enum BattlegroundsBuffKind { Undead, TavernSpells, Beetles, BloodGems }
 
@@ -202,6 +206,8 @@ public sealed class PowerLogParser
     // only honest figure is the one we watched fight.
     private readonly Dictionary<int, SeenBoard> _seen = new();
     private readonly Dictionary<int, int> _places = new();
+    // The first shop turn on which each player's tavern tier was observed.
+    private readonly Dictionary<int, Dictionary<int, int>> _tierTurns = new();
     // Names in DebugPrintGame metadata: the local player and, in duos, their
     // teammate. The other opponents come from the client's shared player info.
     private readonly Dictionary<int, string> _names = new();
@@ -222,6 +228,24 @@ public sealed class PowerLogParser
     private int        _screenTurn;
     private bool       _screenCombat;
     private int        _screenBlows;
+    private long       _screenTick;
+
+    /// <summary>
+    /// Minimizing the client stops its animation log. Forget the old screen
+    /// clock until fresh PowerTaskList lines arrive after the window returns.
+    /// </summary>
+    public void ScreenActive(bool active)
+    {
+        if (active) return;
+        lock (_lock)
+        {
+            _sawScreen = false;
+            _screenTurn = 0;
+            _screenCombat = false;
+            _screenBlows = 0;
+            _screenTick = 0;
+        }
+    }
 
     public void Reset()
     {
@@ -273,6 +297,7 @@ public sealed class PowerLogParser
         _finalOverall = null;
         _seen.Clear();
         _places.Clear();
+        _tierTurns.Clear();
         _names.Clear();
         _screenPlaces.Clear();
         _seenThisFight.Clear();
@@ -280,9 +305,11 @@ public sealed class PowerLogParser
         _ourBoard = Array.Empty<SimSide>();
         _mateTurn = 0;
         _mateSeen = false;
+        _sawScreen = false;
         _screenTurn = 0;
         _screenCombat = false;
         _screenBlows = 0;
+        _screenTick = 0;
     }
 
     /// <summary>Every board reading of the fight in progress (and the one
@@ -352,6 +379,7 @@ public sealed class PowerLogParser
     {
         int at = line.IndexOf(ScreenMarker, StringComparison.Ordinal);
         if (at < 0 || at > 40) return;
+        lock (_lock) _screenTick = Environment.TickCount64;
         string s = line.Substring(at + ScreenMarker.Length).TrimStart();
         if (s.Contains("tag=PLAYER_LEADERBOARD_PLACE value=", StringComparison.Ordinal))
         {
@@ -587,6 +615,17 @@ public sealed class PowerLogParser
                     (e.Tags ??= new())[tag] = n;
                 break;
         }
+        if (tag is "PLAYER_ID" or "PLAYER_TECH_LEVEL") TrackTier(e);
+    }
+
+    private void TrackTier(Entity e)
+    {
+        int level = e.Tag("PLAYER_TECH_LEVEL");
+        if (e.PlayerId == 0 || level is < 1 or > 6) return;
+        var turns = _tierTurns.TryGetValue(e.PlayerId, out var known)
+            ? known
+            : _tierTurns[e.PlayerId] = new Dictionary<int, int>();
+        if (!turns.ContainsKey(level)) turns[level] = Math.Max(1, (_rawTurn + 1) / 2);
     }
 
     private void OpenCombat()
@@ -896,6 +935,10 @@ public sealed class PowerLogParser
             // The leaderboard entity keeps the tavern tier up to date, so it
             // is today's, not the one from the fight we last saw.
             int tier = hero.Tag("PLAYER_TECH_LEVEL");
+            int currentTier = tier > 0 ? tier : board?.TechLevel ?? 0;
+            var tavern = _tierTurns.TryGetValue(pid, out var turns)
+                ? turns.Select(t => new TavernTier(t.Key, t.Value)).OrderBy(t => t.Level).ToList()
+                : new List<TavernTier>();
             lobby.Add(new LobbyPlayer(
                 _screenPlaces.TryGetValue(pid, out int shown) ? shown
                     : _places.TryGetValue(pid, out int at) ? at : 0,
@@ -904,9 +947,10 @@ public sealed class PowerLogParser
                 hero.CardId,
                 pid == _me || (mate != 0 && pid == mate),
                 hero.Health == 0 || hp > 0,
-                tier > 0 ? tier : board?.TechLevel ?? 0,
+                currentTier,
                 board,
-                _names.TryGetValue(pid, out string? nick) ? nick : null));
+                _names.TryGetValue(pid, out string? nick) ? nick : null,
+                tavern));
         }
         lobby.Sort((a, b) => (a.Place == 0 ? 99 : a.Place).CompareTo(b.Place == 0 ? 99 : b.Place));
         return lobby;
@@ -1002,10 +1046,11 @@ public sealed class PowerLogParser
 
             // TURN counts shop and combat phases separately: odd is the shop.
             bool inCombat = _rawTurn > 0 && _rawTurn % 2 == 0;
-            // Without the animation's lines in the log there is nothing but
-            // the data clock to go by.
-            bool onScreenCombat = _sawScreen ? _screenCombat : inCombat;
-            int turn = _sawScreen ? _screenTurn : _rawTurn;
+            // A minimized client stops printing PowerTaskList. Its last screen
+            // state must not pin the overlay to an old fight forever.
+            bool screenCurrent = _sawScreen && Environment.TickCount64 - _screenTick < 5000;
+            bool onScreenCombat = screenCurrent ? _screenCombat : inCombat;
+            int turn = screenCurrent ? _screenTurn : _rawTurn;
             Entity? hero = null;
             if (_me != 0)
             {
@@ -1032,7 +1077,7 @@ public sealed class PowerLogParser
             // later entrance is already part of that count.
             int shopTurn = (turn + 1) / 2;
             List<CombatInfo>? blows =
-                _blows.Count > 0 && (!_sawScreen || _blows[0].Turn == shopTurn) ? _blows :
+                _blows.Count > 0 && (!screenCurrent || _blows[0].Turn == shopTurn) ? _blows :
                 _lastBlows.Count > 0 && _lastBlows[0].Turn == shopTurn ? _lastBlows : null;
             CombatInfo? combat = null;
             CombatInfo? overall = null;
@@ -1046,7 +1091,7 @@ public sealed class PowerLogParser
             }
             else if (onScreenCombat && blows is not null)
             {
-                int screenBlows = _sawScreen ? _screenBlows : int.MaxValue;
+                int screenBlows = screenCurrent ? _screenBlows : int.MaxValue;
                 var myOut = new HashSet<int>();
                 var theirOut = new HashSet<int>();
                 foreach (CombatInfo b in blows)
@@ -1142,7 +1187,8 @@ public sealed class PowerLogParser
         if (_choice is null || _choice.Entities.Count == 0) return null;
         // The offer arrives with the rest of the turn, which the client is
         // still animating: the cards come up on screen only once it is there.
-        if (_sawScreen && (_screenCombat || _screenTurn < _choice.Turn)) return null;
+        bool screenCurrent = _sawScreen && Environment.TickCount64 - _screenTick < 5000;
+        if (screenCurrent && (_screenCombat || _screenTurn < _choice.Turn)) return null;
 
         ChoiceKind kind;
         if (_choice.ChoiceType == "MULLIGAN") kind = ChoiceKind.Hero;

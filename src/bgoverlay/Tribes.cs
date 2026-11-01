@@ -38,6 +38,9 @@ internal static class Tribes
         [126] = "Аберрации",
     };
 
+    /// <summary>Every tribe that can take part in a Battlegrounds lobby.</summary>
+    public static IReadOnlyList<int> All { get; } = Names.Keys.ToArray();
+
     /// <summary>Race id for a CARDRACE value, or 0 for ALL/INVALID/unknown.</summary>
     public static int FromLog(string value)
     {
