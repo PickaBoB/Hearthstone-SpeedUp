@@ -96,6 +96,7 @@ public sealed record GameSnapshot(
     CombatInfo? Combat = null,
     bool CombatWaiting = false,
     bool CombatEnemyTeamOut = false,
+    bool CombatBoardsReady = false,
     CombatInfo? CombatOverall = null,
     IReadOnlyList<BattlegroundsBuff>? Buffs = null)
 {
@@ -1082,16 +1083,22 @@ public sealed class PowerLogParser
             CombatInfo? combat = null;
             CombatInfo? overall = null;
             bool enemyTeamOut = false;
+            bool boardsReady = !IsDuo;
             if (onScreenCombat && blows is not null
                 && _finalCombat is not null && _finalCombatId == blows[0].Id)
             {
                 combat = _finalCombat;
                 overall = _finalOverall;
                 enemyTeamOut = true;
+                boardsReady = true;
             }
             else if (onScreenCombat && blows is not null)
             {
                 int screenBlows = screenCurrent ? _screenBlows : int.MaxValue;
+                bool dataFightComplete = !ReferenceEquals(blows, _blows) || !_combatOpen;
+                int myBoardsInData = blows.SelectMany(b => b.Mine).Select(s => s.HeroEntityId).Distinct().Count();
+                int theirBoardsInData = blows.SelectMany(b => b.Theirs).Select(s => s.HeroEntityId).Distinct().Count();
+                bool fullRelayKnown = !IsDuo || dataFightComplete || (myBoardsInData >= 2 && theirBoardsInData >= 2);
                 var myOut = new HashSet<int>();
                 var theirOut = new HashSet<int>();
                 foreach (CombatInfo b in blows)
@@ -1117,18 +1124,17 @@ public sealed class PowerLogParser
                     theirOut.UnionWith(blows[0].Theirs.Select(s => s.HeroEntityId));
                 }
 
-                // A second enemy board the data does not hold at all is one
-                // this fight will never see (a dead opponent's team fields a
-                // single board): no point holding the figure back for it.
-                // Before the first blow the fight's dump may still be
-                // streaming in, so its absence is not trusted yet.
+                // Only a complete data relay can prove that a team has a
+                // single board. While it is still streaming, the other board
+                // may simply not have arrived yet.
                 bool enemySecondInData = blows.Any(b => b.Theirs.Any(s => !theirOut.Contains(s.HeroEntityId)));
-                if (!enemySecondInData && screenBlows > 0) enemyTeamOut = true;
+                if (dataFightComplete && !enemySecondInData && screenBlows > 0) enemyTeamOut = true;
 
                 // The boards still waiting behind the current line-up are in
                 // the data already. Counted in, the figure is the whole
                 // fight -- the remaining relay once they join -- rather than
-                // just the pairing on the field.
+                // just the pairing on the field. Never build it from one full
+                // team and one partial team.
                 var myWaiting = new List<SimSide>();
                 var theirWaiting = new List<SimSide>();
                 foreach (CombatInfo b in blows)
@@ -1137,9 +1143,10 @@ public sealed class PowerLogParser
                     foreach (SimSide s in b.Mine) if (myOut.Add(s.HeroEntityId)) myWaiting.Add(s);
                     foreach (SimSide s in b.Theirs) if (theirOut.Add(s.HeroEntityId)) theirWaiting.Add(s);
                 }
-                if (myWaiting.Count > 0 || theirWaiting.Count > 0)
+                if (fullRelayKnown && (myWaiting.Count > 0 || theirWaiting.Count > 0))
                     overall = Overall(combat, myWaiting, theirWaiting);
-                if (enemyTeamOut)
+                boardsReady = !IsDuo || (enemyTeamOut && fullRelayKnown);
+                if (boardsReady)
                 {
                     _finalCombatId = combat.Id;
                     _finalCombat = combat;
@@ -1150,7 +1157,7 @@ public sealed class PowerLogParser
             var seen = _seen.Values.OrderByDescending(b => b.Turn).ThenBy(b => b.PlayerId).ToList();
             return new GameSnapshot(true, IsDuo, counts, tribes, confident, BuildChoice(), seen, Lobby(),
                 hero?.CardId, hero?.Name, shopTurn, onScreenCombat, _boardStats, _boardMinions,
-                combat, onScreenCombat && combat is null, enemyTeamOut, overall, Buffs());
+                combat, onScreenCombat && combat is null, enemyTeamOut, boardsReady, overall, Buffs());
         }
     }
 

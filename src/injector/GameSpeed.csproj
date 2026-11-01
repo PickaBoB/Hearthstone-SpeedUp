@@ -32,6 +32,9 @@
   <!-- One program: the overlay's half of the sources builds into this exe. -->
   <ItemGroup>
     <Compile Include="..\bgoverlay\*.cs" Link="Battlegrounds\%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\bgoverlay\TribeIcons\*.jpg"
+                      Link="TribeIcons\%(Filename)%(Extension)"
+                      LogicalName="GameSpeed.TribeIcons.%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

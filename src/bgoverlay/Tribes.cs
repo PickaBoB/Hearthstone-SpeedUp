@@ -38,8 +38,25 @@ internal static class Tribes
         [126] = "Аберрации",
     };
 
+    private static readonly Dictionary<int, string> IconNames = new()
+    {
+        [11] = "undead", [14] = "murloc", [15] = "demon", [17] = "mech",
+        [18] = "elemental", [20] = "pet", [23] = "pirate", [24] = "dragon",
+        [43] = "quilboar", [92] = "naga", [126] = "aberration",
+    };
+
+    private static readonly Dictionary<int, string> ShortNames = new()
+    {
+        [11] = "Нежить", [14] = "Мурлок", [15] = "Демон", [17] = "Механизм",
+        [18] = "Элементаль", [20] = "Зверь", [23] = "Пират", [24] = "Дракон",
+        [43] = "Свинобраз", [92] = "Нага", [126] = "Аберрация",
+    };
+
     /// <summary>Every tribe that can take part in a Battlegrounds lobby.</summary>
     public static IReadOnlyList<int> All { get; } = Names.Keys.ToArray();
+
+    public static string? IconName(int id) => IconNames.TryGetValue(id, out var name) ? name : null;
+    public static string ShortName(int id) => ShortNames.TryGetValue(id, out var name) ? name : Name(id);
 
     /// <summary>Race id for a CARDRACE value, or 0 for ALL/INVALID/unknown.</summary>
     public static int FromLog(string value)

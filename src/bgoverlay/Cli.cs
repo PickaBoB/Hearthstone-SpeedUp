@@ -218,7 +218,7 @@ internal static class Cli
             parser.Feed(line);
             var snap = parser.Snapshot();
             string key = snap.InCombat + "|" + snap.CombatWaiting + "|"
-                + snap.CombatEnemyTeamOut + "|" + (snap.Combat?.Key ?? "-")
+                + snap.CombatEnemyTeamOut + "|" + snap.CombatBoardsReady + "|" + (snap.Combat?.Key ?? "-")
                 + "|" + (snap.CombatOverall?.Key ?? "-");
             if (key == lastKey) continue;
             lastKey = key;
@@ -227,7 +227,7 @@ internal static class Cli
             string Sides(IReadOnlyList<SimSide> ss) => string.Join("+",
                 ss.Select(s => $"{s.HeroCardId}#{s.HeroEntityId}:{s.Board.Count}сущ"));
             Console.WriteLine($"{time}  бой {c.Id} ход {c.Turn} удар {c.Blow}"
-                + $"  враг2вышел={snap.CombatEnemyTeamOut}"
+                + $"  враг2вышел={snap.CombatEnemyTeamOut}  готово={snap.CombatBoardsReady}"
                 + $"  мы [{Sides(c.Mine)}]  они [{Sides(c.Theirs)}]"
                 + (snap.CombatOverall is { } o
                     ? $"  весьбой мы [{Sides(o.Mine)}]  они [{Sides(o.Theirs)}]" : ""));
@@ -323,6 +323,8 @@ internal static class Cli
                 art.Art(board.HeroCard);
             foreach (HistoryRow past in model.History?.Rows ?? Enumerable.Empty<HistoryRow>())
                 art.Art(past.HeroCard);
+            foreach (HistoryRow past in model.Panel?.Games ?? Enumerable.Empty<HistoryRow>())
+                art.Tile(past.HeroCard);
             foreach (BattlegroundsBuff buff in model.Buffs ?? [])
             {
                 art.Tile(buff.CardId);

@@ -14,6 +14,7 @@ internal sealed class CardArt : IDisposable
     private static readonly TimeSpan Retry = TimeSpan.FromMinutes(10);
 
     private readonly Dictionary<string, Image?> _tiles = new();
+    private readonly Dictionary<int, Image?> _tribes = new();
     private readonly Dictionary<string, DateTime> _failed = new();
     private readonly HashSet<string> _fetching = new();
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(20) };
@@ -28,6 +29,22 @@ internal sealed class CardArt : IDisposable
 
     /// <summary>The square art, for a minion's portrait on a board.</summary>
     public Image? Art(string cardId) => Get(cardId, square: true);
+
+    /// <summary>The embedded Hearthstone Deck Tracker tribe icon.</summary>
+    public Image? Tribe(int tribe)
+    {
+        if (_tribes.TryGetValue(tribe, out Image? cached)) return cached;
+        string? name = Tribes.IconName(tribe);
+        using var stream = name is null ? null : typeof(CardArt).Assembly.GetManifestResourceStream(
+            $"GameSpeed.TribeIcons.{name}.jpg");
+        Image? picture = null;
+        if (stream is not null)
+        {
+            using var raw = new Bitmap(stream);
+            picture = new Bitmap(raw);
+        }
+        return _tribes[tribe] = picture;
+    }
 
     /// <summary>
     /// The picture, or null while it is on its way. Call from the UI thread:
@@ -90,7 +107,9 @@ internal sealed class CardArt : IDisposable
     public void Dispose()
     {
         foreach (Image? tile in _tiles.Values) tile?.Dispose();
+        foreach (Image? tribe in _tribes.Values) tribe?.Dispose();
         _tiles.Clear();
+        _tribes.Clear();
         _http.Dispose();
     }
 }

@@ -11,7 +11,6 @@ namespace BgOverlay;
 internal sealed class BattlegroundsPanel : UserControl
 {
     private static readonly int[] Percentiles = { 100, 50, 25, 10, 1 };
-    private static readonly Color Muted = Color.FromArgb(152, 158, 175);
 
     private readonly LogReader   _reader = new();
     private readonly StatsStore  _stats = new();
@@ -50,6 +49,9 @@ internal sealed class BattlegroundsPanel : UserControl
     private int _peekSlot = -1;
     private int _hsProcess;
     private int _ratingBefore;
+    private string _ratingSession = "";
+    private int _ratingStartSolo;
+    private int _ratingStartDuo;
     private bool _wasInGame;
     private OverlayModel? _model;
     private IntPtr _hsWindow;
@@ -286,6 +288,7 @@ internal sealed class BattlegroundsPanel : UserControl
         GameSnapshot snap = _reader.Parser.Snapshot();
         _rating.Poll(_hsProcess);
         _lobbyNames.Poll(_hsProcess);
+        TrackRatingSession(snap);
         // The rating moves between games, so each game is bracketed by the
         // value before it started and the one that lands after it ends.
         if (snap.InBattlegrounds && !_wasInGame) _ratingBefore = _rating.Of(snap.IsDuo);
@@ -406,7 +409,8 @@ internal sealed class BattlegroundsPanel : UserControl
           .Append(s.Turn).Append(s.InCombat).Append('|').Append(s.BoardStats).Append('/').Append(s.BoardMinions).Append('|')
           .Append(s.CombatWaiting).Append('|').Append(s.Combat?.Key).Append('|')
           .Append(s.Combat?.HasExactGuess).Append('|')
-          .Append(s.CombatEnemyTeamOut).Append('|').Append(s.CombatOverall?.Key).Append('|')
+          .Append(s.CombatEnemyTeamOut).Append('|').Append(s.CombatBoardsReady).Append('|')
+          .Append(s.CombatOverall?.Key).Append('|')
           .Append(s.CombatOverall?.HasExactGuess).Append('|')
           .Append(string.Join(",", (s.Buffs ?? []).Select(b => $"{b.Kind}:{b.Attack}/{b.Health}"))).Append('|')
           .Append(Settings.Current.PanelEnabled).Append(Settings.Current.TurnEnabled).Append('|');
@@ -427,9 +431,9 @@ internal sealed class BattlegroundsPanel : UserControl
             return new OverlayModel(null, [], "", Banner: new WinBanner(true,
                 "Перезапустите Hearthstone", "Оверлею нужен Power.log текущего запуска игры",
                 null, null, null));
-        // Out of a game the screen is free: show how the last ones went.
+        // The same session recap stays on screen between games.
         if (!snap.InBattlegrounds)
-            return BuildHistory() is { } past ? new OverlayModel(null, [], "", null, null, past) : null;
+            return new OverlayModel(null, [], "", BuildPanel(snap));
 
         // The turn, for the corner plate: the game shows it nowhere itself.
         string turn = snap.Turn > 0 ? $"Ход {snap.Turn}" : "";
@@ -464,11 +468,11 @@ internal sealed class BattlegroundsPanel : UserControl
         if (snap.CombatWaiting || snap.Combat is null)
             return new WinBanner(true, "Бой начинается…", "ждём выход карт", null, null, null);
 
-        // In duos the figure that counts the whole fight waits for the
-        // second enemy board to step out: before that the fight's shape is
-        // not all there. In solo the pairing is the fight, shown at once.
-        if (snap.IsDuo && !snap.CombatEnemyTeamOut)
-            return new WinBanner(true, "Бой идёт…", "ждём вторую доску соперника", null, null, null);
+        // In duos the figure waits for the second enemy board on screen and
+        // for both teams' boards in the data. In solo the pairing is the
+        // fight, shown at once.
+        if (snap.IsDuo && !snap.CombatBoardsReady)
+            return new WinBanner(true, "Бой идёт…", "ждём все доски", null, null, null);
 
         var g = (snap.CombatOverall ?? snap.Combat).Guess();
         if (g.Waiting) return new WinBanner(true, "Считаю бой…", g.Status, null, null, null);
@@ -477,37 +481,46 @@ internal sealed class BattlegroundsPanel : UserControl
         return new WinBanner(false, $"{g.Win!.Value * 100:0}%", sub, g.Win, g.Tie, g.Lose);
     }
 
-    private IReadOnlyList<PanelLine> BuildPanel(GameSnapshot snap)
+    private void TrackRatingSession(GameSnapshot snap)
     {
-        var lines = new List<PanelLine>();
-        HeroSummary? s = Rating.Summarize(snap, _stats);
-        if (s is not null)
+        string session = CurrentSession();
+        if (session != _ratingSession)
         {
-            var h = s.Hero;
-            lines.Add(PanelLine.Title(h.Option.Name, h.Tier, OverlayForm.TierColor(h.Tier),
-                snap.MyHeroCardId ?? ""));
+            _ratingSession = session;
+            _ratingStartSolo = _ratingStartDuo = 0;
         }
-        else if (snap.MyHeroCardId is { Length: > 0 } heroCard)
+        if (!snap.InBattlegrounds) return;
+        if (snap.IsDuo)
         {
-            lines.Add(PanelLine.Title(snap.MyHeroName ?? heroCard, "?", OverlayForm.TierColor("?"), heroCard));
+            if (_ratingStartDuo == 0) _ratingStartDuo = _rating.Duo;
         }
-
-        AddTribes(lines, snap);
-        return lines;
+        else if (_ratingStartSolo == 0) _ratingStartSolo = _rating.Solo;
     }
 
-    private static void AddTribes(List<PanelLine> lines, GameSnapshot snap)
+    private LobbyPanel BuildPanel(GameSnapshot snap)
     {
-        lines.Add(PanelLine.Section("Расы в лобби"));
-        lines.Add(PanelLine.Note(snap.Tribes.Count > 0
-            ? string.Join(", ", snap.Tribes.Select(Tribes.Name)) + (snap.TribesConfident ? "" : " (пока не все)")
-            : "Пока не определены", Muted));
-
-        lines.Add(PanelLine.Section("Забанены"));
-        var banned = snap.TribesConfident ? Tribes.All.Except(snap.Tribes).Select(Tribes.Name).ToList() : [];
-        lines.Add(PanelLine.Note(snap.TribesConfident
-            ? string.Join(", ", banned)
-            : "Пока не определены", Muted));
+        var session = SessionGames();
+        bool duo = snap.InBattlegrounds ? snap.IsDuo : session.FirstOrDefault()?.IsDuo ?? false;
+        IReadOnlyList<int> tribes = snap.InBattlegrounds
+            ? snap.Tribes
+            : session.FirstOrDefault()?.Tribes ?? new List<int>();
+        var available = tribes.OrderBy(Tribes.ShortName).ToList();
+        bool tribesKnown = snap.InBattlegrounds ? snap.TribesConfident : available.Count == 5;
+        var banned = tribesKnown
+            ? Tribes.All.Except(available).OrderBy(Tribes.ShortName).ToList()
+            : new List<int>();
+        var games = session.Take(8).Select(SessionGameRow).ToList();
+        var modeGames = session.Where(g => g.IsDuo == duo).ToList();
+        int start = duo ? _ratingStartDuo : _ratingStartSolo;
+        int current = _rating.Of(duo);
+        if (modeGames.Count > 0)
+        {
+            if (modeGames[^1].RatingBefore > 0) start = modeGames[^1].RatingBefore;
+            if (current == 0) current = modeGames[0].Rating;
+        }
+        if (start == 0) start = current;
+        if (current == 0) current = start;
+        return new LobbyPanel(available, banned, start, current, games);
     }
 
     // A session's worth of games; the strip is narrow enough to carry them.
@@ -586,25 +599,27 @@ internal sealed class BattlegroundsPanel : UserControl
         return _history.Games.Where(g => SessionOf(g) == session).ToList();
     }
 
+    private static HistoryRow SessionGameRow(GameResult g) => new(
+        g.Place.ToString(),
+        OverlayForm.PlaceColor(g.Place, g.IsDuo),
+        g.HeroCardId,
+        g.HeroName,
+        (g.IsDuo ? "дуэты" : "соло")
+            + (g.Tribes.Count > 0 ? " · " + string.Join(", ", g.Tribes.Select(Tribes.Name)) : ""),
+        g.Finished.ToString("HH:mm"),
+        Delta(g),
+        DeltaInk(g),
+        $"{g.Place} место · ход {g.Turns} · {g.BoardStats} ат.+зд.",
+        g.Board.Select(m => new BoardCard(m.CardId, m.Name, $"{m.Attack}/{m.Health}", m.Marks, MarkInk(m.Marks)))
+            .ToList());
+
     private HistoryPanel? BuildHistory()
     {
         var played = SessionGames();
         var games = played.Take(HistoryRows).ToList();
         if (games.Count == 0) return null;
 
-        var rows = games.Select(g => new HistoryRow(
-            g.Place.ToString(),
-            OverlayForm.PlaceColor(g.Place, g.IsDuo),
-            g.HeroCardId,
-            g.HeroName,
-            (g.IsDuo ? "дуэты" : "соло")
-                + (g.Tribes.Count > 0 ? " · " + string.Join(", ", g.Tribes.Select(Tribes.Name)) : ""),
-            g.Finished.ToString("HH:mm"),
-            Delta(g),
-            g.Rating >= g.RatingBefore ? OverlayForm.Good : OverlayForm.Bad,
-            $"{g.Place} место · ход {g.Turns} · {g.BoardStats} ат.+зд.",
-            g.Board.Select(m => new BoardCard(m.CardId, m.Name, $"{m.Attack}/{m.Health}", m.Marks, MarkInk(m.Marks)))
-                .ToList())).ToList();
+        var rows = games.Select(SessionGameRow).ToList();
 
         bool duo = games[0].IsDuo;
         double avg = played.Average(g => (double)g.Place);
@@ -632,10 +647,16 @@ internal sealed class BattlegroundsPanel : UserControl
     /// <summary>How the rating moved over a game, when both ends are known.</summary>
     private static string Delta(GameResult g)
     {
-        if (g.Rating <= 0 || g.RatingBefore <= 0 || g.Rating == g.RatingBefore) return "";
+        if (g.Rating <= 0 || g.RatingBefore <= 0) return "";
+        if (g.Rating == g.RatingBefore) return "+0";
         int d = g.Rating - g.RatingBefore;
         return d > 0 ? $"+{d}" : d.ToString();
     }
+
+    private static Color DeltaInk(GameResult g) =>
+        g.Rating > g.RatingBefore ? OverlayForm.Good :
+        g.Rating < g.RatingBefore ? OverlayForm.Bad :
+                                    Color.FromArgb(152, 158, 175);
 
     private string MmrCaption() => _stats.Percentile == 100 ? "все игроки" : $"топ-{_stats.Percentile}%";
 
@@ -667,9 +688,14 @@ internal sealed class BattlegroundsPanel : UserControl
             sb.Append("Наведите курсор на игру в оверлее — покажет её доску.");
             return sb.ToString();
         }
-        if (m.Panel is { Count: > 0 })
+        if (m.Panel is { } panel)
         {
-            foreach (var l in m.Panel.Where(l => l.Style != PanelStyle.Rule)) sb.AppendLine(l.Flat);
+            sb.AppendLine("Представлены: " + string.Join(", ", panel.Available.Select(Tribes.Name)));
+            if (panel.Banned.Count > 0)
+                sb.AppendLine("Забанены: " + string.Join(", ", panel.Banned.Select(Tribes.Name)));
+            sb.AppendLine($"MMR: {panel.RatingStart} → {panel.RatingCurrent}");
+            foreach (var game in panel.Games)
+                sb.AppendLine($"  {game.Place} место  {game.Delta,5}  {game.Hero}");
             sb.AppendLine();
         }
         if (m.Kind is null)

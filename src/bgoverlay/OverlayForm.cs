@@ -4,26 +4,9 @@ using System.Drawing.Text;
 
 namespace BgOverlay;
 
-public enum PanelStyle { Title, Pair, Note, Rule, Section }
-
-/// <summary>
-/// One row of the side panel: a hero heading, a section caption, a label with
-/// its value, small print or a separator.
-/// </summary>
-public sealed record PanelLine(PanelStyle Style, string Text, string Value, Color Ink, string Card = "")
-{
-    public static PanelLine Title(string text, string chip, Color ink, string card = "") =>
-        new(PanelStyle.Title, text, chip, ink, card);
-    public static PanelLine Pair(string label, string value, Color ink) =>
-        new(PanelStyle.Pair, label, value, ink);
-    public static PanelLine Note(string text, Color ink) => new(PanelStyle.Note, text, "", ink);
-    public static PanelLine Rule() => new(PanelStyle.Rule, "", "", Color.Empty);
-    /// <summary>A caption with a hairline out to the edge: what the rows under it are.</summary>
-    public static PanelLine Section(string text) => new(PanelStyle.Section, text, "", Color.Empty);
-
-    /// <summary>The row as one line of text, for the control window.</summary>
-    public string Flat => Value.Length > 0 ? $"{Text}: {Value}" : Text;
-}
+/// <summary>The session recap shown beside the game, in Deck Tracker's layout.</summary>
+public sealed record LobbyPanel(IReadOnlyList<int> Available, IReadOnlyList<int> Banned,
+    int RatingStart, int RatingCurrent, IReadOnlyList<HistoryRow> Games);
 
 /// <summary>One finished game in the list the overlay shows between games.</summary>
 public sealed record HistoryRow(string Place, Color PlaceInk, string HeroCard, string Hero, string Tribes,
@@ -53,7 +36,7 @@ public sealed record OverlayModel(
     ChoiceKind? Kind,
     IReadOnlyList<RatedOption> Items,
     string Header,
-    IReadOnlyList<PanelLine>? Panel = null,
+    LobbyPanel? Panel = null,
     WinBanner? Banner = null,
     HistoryPanel? History = null,
     BoardPeek? Peek = null,
@@ -162,7 +145,7 @@ internal sealed class OverlayForm : Form
         if (model.History is { Rows.Count: > 0 } history) DrawHistory(g, history, art, size, h);
         if (model.Peek is { Boards.Count: > 0 } peek) DrawPeek(g, peek, art, size, h);
         if (model.Banner is { } banner) DrawBanner(g, banner, w, h);
-        if (model.Panel is { Count: > 0 } panel && Settings.Current.PanelEnabled) DrawPanel(g, panel, art, size, h);
+        if (model.Panel is { } panel && Settings.Current.PanelEnabled) DrawPanel(g, panel, art, size, h);
         if (model.Turn.Length > 0 && Settings.Current.TurnEnabled) DrawTurn(g, model.Turn, size, h);
         if (model.Buffs is { Count: > 0 } buffs) DrawBuffs(g, buffs, art, size, h);
         if (model.Kind is null) return;
@@ -289,137 +272,208 @@ internal sealed class OverlayForm : Form
     /// </summary>
     internal static (float X, float W) PanelBox(Size size, float h)
     {
-        float x = PlayLeft(size) + 0.010f * h;
+        float x = PlayLeft(size);
         float stop = PlayLeft(size) + (float)Settings.Current.PeekX * h - 0.014f * h;
         return (x, Math.Clamp(stop - x, 0.150f * h, 0.224f * h));
     }
 
-    /// <summary>
-    /// The side panel: the hero with its tier and average place, the board
-    /// against this turn's average, and the tribes in the lobby.
-    /// </summary>
-    private static void DrawPanel(Graphics g, IReadOnlyList<PanelLine> lines, CardArt? art, Size size, float h)
+    /// <summary>The session recap in Hearthstone Deck Tracker's three-section layout.</summary>
+    private static void DrawPanel(Graphics g, LobbyPanel panel, CardArt? art, Size size, float h)
     {
         var (x, w) = PanelBox(size, h);
-        float pad = 0.011f * h, gap = 0.0050f * h;
         float y = (float)(Settings.Current.PanelY * h);
-        float inner = w - 2 * pad;
-        float titleH = 0.034f * h, pairH = 0.020f * h;
-        float sectionH = 0.023f * h, sectionAir = 0.006f * h;
-        float ruleH = Math.Max(1f, 0.0011f * h), radius = 0.009f * h;
+        float sectionH = 0.026f * h, tribeH = 0.058f * h, emptyH = 0.060f * h;
+        float mmrH = 0.052f * h, gameH = 0.032f * h, gameHeadH = 0.021f * h;
+        float gamesH = panel.Games.Count > 0 ? gameHeadH + panel.Games.Count * gameH : emptyH;
+        float total = sectionH + (panel.Available.Count > 0 ? tribeH : emptyH)
+                    + (panel.Banned.Count > 0 ? tribeH : 0) + sectionH + mmrH + sectionH + gamesH;
+        var body = new RectangleF(x, y, w, total);
+        Color bodyInk = Color.FromArgb(222, 46, 50, 53);
+        Color headInk = Color.FromArgb(230, 28, 32, 34);
+        Color ruleInk = Color.FromArgb(74, 82, 86);
 
-        using var nameFont    = new Font("Segoe UI", 0.0170f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var chipFont    = new Font("Segoe UI", 0.0160f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var sectionFont = new Font("Segoe UI", 0.0110f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var labelFont   = new Font("Segoe UI", 0.0140f * h, FontStyle.Regular, GraphicsUnit.Pixel);
-        using var valueFont   = new Font("Segoe UI", 0.0158f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var noteFont    = new Font("Segoe UI", 0.0126f * h, FontStyle.Regular, GraphicsUnit.Pixel);
-        using var flow  = new StringFormat(StringFormat.GenericTypographic);
-        using var clip  = new StringFormat(StringFormat.GenericTypographic)
-            { FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
-        using var midLeft = new StringFormat(StringFormat.GenericTypographic)
-            { FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter,
-              LineAlignment = StringAlignment.Center };
-        using var midRight = new StringFormat(StringFormat.GenericTypographic)
-            { FormatFlags = StringFormatFlags.NoWrap, Alignment = StringAlignment.Far,
-              LineAlignment = StringAlignment.Center };
-        using var middle = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-
-        float RowHeight(PanelLine l) => l.Style switch
-        {
-            PanelStyle.Title   => titleH,
-            PanelStyle.Section => sectionH,
-            PanelStyle.Pair    => pairH,
-            PanelStyle.Note    => g.MeasureString(l.Text, noteFont, new SizeF(inner, 1e4f), flow).Height + 0.0015f * h,
-            _                  => ruleH + gap,
-        };
-
-        float total = 2 * pad - gap;
-        foreach (var l in lines) total += RowHeight(l) + gap;
-
-        bool titled = lines[0].Style == PanelStyle.Title;
-        Color accent = titled ? lines[0].Ink : Color.FromArgb(255, 196, 70);
-        float bandH = pad + titleH + gap;
+        using var headFont = new Font("Segoe UI", 0.0115f * h, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var smallFont = new Font("Segoe UI", 0.0090f * h, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var numberFont = new Font("Segoe UI", 0.0160f * h, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var gameFont = new Font("Segoe UI", 0.0120f * h, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var gameBold = new Font("Segoe UI", 0.0135f * h, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var center = new StringFormat(StringFormat.GenericTypographic)
+            { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center,
+              FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
+        using var left = new StringFormat(StringFormat.GenericTypographic)
+            { LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap,
+              Trimming = StringTrimming.EllipsisCharacter };
 
         SmoothingMode was = g.SmoothingMode;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        using (GraphicsPath frame = Pill(new RectangleF(x, y, w, total), radius))
+        using (var bg = new SolidBrush(bodyInk)) g.FillRectangle(bg, body);
+
+        float cy = y;
+        void Header(string text)
         {
-            using var bg = new SolidBrush(Back);
-            g.FillPath(bg, frame);
-            if (titled)
-            {
-                // The heading sits on its own band; the band's lower corners
-                // are square, so only the panel's own outline is rounded.
-                Region old = g.Clip;
-                g.SetClip(new RectangleF(x, y, w, bandH), CombineMode.Intersect);
-                using (var band = new SolidBrush(Band))
-                using (GraphicsPath top = Pill(new RectangleF(x, y, w, bandH + 2 * radius), radius))
-                    g.FillPath(band, top);
-                g.Clip = old;
-                using var line = new SolidBrush(accent);
-                g.FillRectangle(line, x, y + bandH - 0.0022f * h, w, 0.0022f * h);
-            }
-            using var edge = new Pen(Frame, Math.Max(1f, 0.0013f * h));
-            g.DrawPath(edge, frame);
+            using var bg = new SolidBrush(headInk);
+            using var ink = new SolidBrush(Ink);
+            g.FillRectangle(bg, x, cy, w, sectionH);
+            g.DrawString(text, headFont, ink, new RectangleF(x, cy, w, sectionH), center);
+            using var rule = new SolidBrush(ruleInk);
+            g.FillRectangle(rule, x, cy + sectionH - 1, w, 1);
+            cy += sectionH;
+        }
+        void Rule()
+        {
+            using var rule = new SolidBrush(ruleInk);
+            g.FillRectangle(rule, x, cy, w, 1);
         }
 
-        using var labelInk = new SolidBrush(Muted);
-        using var sectionInk = new SolidBrush(Dim);
-        float tx = x + pad, cy = y + pad;
-        foreach (var l in lines)
+        Header("Представлены");
+        if (panel.Available.Count > 0)
         {
-            float rh = RowHeight(l);
-            using var ink = new SolidBrush(l.Ink == Color.Empty ? Ink : l.Ink);
-            switch (l.Style)
-            {
-                case PanelStyle.Title:
-                    float face = l.Card.Length > 0 ? titleH : 0;
-                    float cw = 0;
-                    if (l.Value.Length > 0)
-                    {
-                        cw = Math.Max(g.MeasureString(l.Value, chipFont).Width + 0.004f * h, 0.026f * h);
-                        var chip = new RectangleF(x + w - pad - cw, cy + (titleH - 0.026f * h) / 2, cw, 0.026f * h);
-                        using (GraphicsPath box = Pill(chip, 0.005f * h))
-                            g.FillPath(ink, box);
-                        g.DrawString(l.Value, chipFont, Brushes.Black, chip, middle);
-                    }
-                    if (face > 0)
-                        DrawFace(g, l.Card, art, new RectangleF(tx, cy, face, face), l.Ink, h);
-                    using (var nameInk = new SolidBrush(Ink))
-                        g.DrawString(l.Text, nameFont, nameInk,
-                            new RectangleF(tx + face + (face > 0 ? 0.008f * h : 0), cy,
-                                inner - face - cw - 0.012f * h, titleH), midLeft);
-                    break;
-
-                case PanelStyle.Section:
-                    SizeF caption = g.MeasureString(l.Text, sectionFont, int.MaxValue, clip);
-                    float top = cy + sectionAir;
-                    g.DrawString(l.Text, sectionFont, sectionInk,
-                        new RectangleF(tx, top, inner, sectionH - sectionAir), midLeft);
-                    using (var rule = new SolidBrush(Edge))
-                        g.FillRectangle(rule, tx + caption.Width + 0.006f * h,
-                            MathF.Round(top + (sectionH - sectionAir) / 2),
-                            Math.Max(0f, inner - caption.Width - 0.006f * h), ruleH);
-                    break;
-
-                case PanelStyle.Pair:
-                    g.DrawString(l.Text, labelFont, labelInk, new RectangleF(tx, cy, inner, pairH), midLeft);
-                    g.DrawString(l.Value, valueFont, ink, new RectangleF(tx, cy, inner, pairH), midRight);
-                    break;
-
-                case PanelStyle.Note:
-                    g.DrawString(l.Text, noteFont, ink, new RectangleF(tx, cy, inner + 1, rh + 1), flow);
-                    break;
-
-                default:
-                    using (var rule = new SolidBrush(Edge))
-                        g.FillRectangle(rule, tx, MathF.Round(cy + gap / 2), inner, ruleH);
-                    break;
-            }
-            cy += rh + gap;
+            DrawTribeRow(g, panel.Available, art, x, cy, w, h, banned: false);
+            cy += tribeH;
         }
+        else
+        {
+            using var ink = new SolidBrush(Muted);
+            g.DrawString("Расы появятся в следующей игре", smallFont, ink,
+                new RectangleF(x + 0.005f * h, cy, w - 0.010f * h, emptyH), center);
+            cy += emptyH;
+        }
+        if (panel.Banned.Count > 0)
+        {
+            Rule();
+            DrawTribeRow(g, panel.Banned, art, x, cy, w, h, banned: true);
+            cy += tribeH;
+        }
+
+        Header("MMR");
+        float half = w / 2;
+        using (var labelInk = new SolidBrush(Muted))
+        using (var numberInk = new SolidBrush(Ink))
+        {
+            g.DrawString("Начальный", smallFont, labelInk, new RectangleF(x, cy + 0.004f * h, half, 0.016f * h), center);
+            g.DrawString("Текущий", smallFont, labelInk, new RectangleF(x + half, cy + 0.004f * h, half, 0.016f * h), center);
+            g.DrawString(Mmr(panel.RatingStart), numberFont, numberInk,
+                new RectangleF(x, cy + 0.020f * h, half, 0.028f * h), center);
+            g.DrawString(Mmr(panel.RatingCurrent), numberFont, numberInk,
+                new RectangleF(x + half, cy + 0.020f * h, half, 0.028f * h), center);
+        }
+        using (var divider = new SolidBrush(ruleInk)) g.FillRectangle(divider, x + half, cy, 1, mmrH);
+        cy += mmrH;
+
+        Header("Последние игры");
+        if (panel.Games.Count == 0)
+        {
+            using var ink = new SolidBrush(Muted);
+            g.DrawString("Ни одной игры не сыграно в этой сессии.\nПоследние 8 партий появятся здесь.",
+                smallFont, ink, new RectangleF(x + 0.005f * h, cy, w - 0.010f * h, emptyH), center);
+            cy += emptyH;
+        }
+        else
+        {
+            using var labels = new SolidBrush(Muted);
+            g.DrawString("Герой", smallFont, labels, new RectangleF(x + 0.007f * h, cy, w * 0.48f, gameHeadH), left);
+            g.DrawString("Место", smallFont, labels, new RectangleF(x + w * 0.52f, cy, w * 0.22f, gameHeadH), center);
+            g.DrawString("MMR", smallFont, labels, new RectangleF(x + w * 0.74f, cy, w * 0.24f, gameHeadH), center);
+            cy += gameHeadH;
+
+            foreach (HistoryRow game in panel.Games)
+            {
+                using (var rowBg = new SolidBrush(Color.FromArgb(90, 0, 0, 0)))
+                    g.FillRectangle(rowBg, x, cy, w, gameH);
+                Image? tile = art?.Tile(game.HeroCard);
+                if (tile is not null)
+                {
+                    var row = new Rectangle((int)x, (int)cy, (int)w, (int)gameH);
+                    float srcX = tile.Width * (34f / 256f);
+                    float srcW = tile.Width - srcX;
+                    float srcH = Math.Min(tile.Height, srcW * gameH / w);
+                    float srcY = (tile.Height - srcH) / 2;
+                    using var attributes = new ImageAttributes();
+                    attributes.SetColorMatrix(new ColorMatrix { Matrix33 = 0.45f });
+                    g.DrawImage(tile, row, srcX, srcY, srcW, srcH, GraphicsUnit.Pixel, attributes);
+                    using var shade = new LinearGradientBrush(row,
+                        Color.FromArgb(35, 0, 0, 0), Color.FromArgb(115, 0, 0, 0), 0f);
+                    g.FillRectangle(shade, row);
+                }
+                using var heroInk = new SolidBrush(Ink);
+                using var placeInk = new SolidBrush(game.PlaceInk);
+                using var deltaInk = new SolidBrush(game.DeltaInk);
+                g.DrawString(game.Hero, gameFont, heroInk,
+                    new RectangleF(x + 0.007f * h, cy, w * 0.48f, gameH), left);
+                g.DrawString(game.Place, gameBold, placeInk,
+                    new RectangleF(x + w * 0.52f, cy, w * 0.22f, gameH), center);
+                g.DrawString(game.Delta, gameBold, deltaInk,
+                    new RectangleF(x + w * 0.74f, cy, w * 0.24f, gameH), center);
+                cy += gameH;
+            }
+        }
+
+        using (var edge = new Pen(ruleInk, Math.Max(1f, 0.0010f * h))) g.DrawRectangle(edge, body);
         g.SmoothingMode = was;
+    }
+
+    private static string Mmr(int value) => value > 0 ? value.ToString("N0") : "—";
+
+    /// <summary>One row of circular tribe icons, greyed and crossed when banned.</summary>
+    private static void DrawTribeRow(Graphics g, IReadOnlyList<int> tribes, CardArt? art,
+        float x, float y, float w, float h, bool banned)
+    {
+        float cell = w / tribes.Count, icon = 0.035f * h;
+        using var font = new Font("Segoe UI", 0.0080f * h, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var center = new StringFormat(StringFormat.GenericTypographic)
+            { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center,
+              FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
+        for (int i = 0; i < tribes.Count; i++)
+        {
+            int tribe = tribes[i];
+            float cx = x + i * cell + (cell - icon) / 2;
+            var box = new RectangleF(cx, y + 0.006f * h, icon, icon);
+            Image? picture = art?.Tribe(tribe);
+            using (var path = new GraphicsPath())
+            {
+                path.AddEllipse(box);
+                Region old = g.Clip;
+                g.SetClip(path, CombineMode.Replace);
+                if (picture is not null)
+                {
+                    if (banned)
+                    {
+                        using var attributes = new ImageAttributes();
+                        attributes.SetColorMatrix(new ColorMatrix(new[]
+                        {
+                            new[] { 0.30f, 0.59f, 0.11f, 0, 0 },
+                            new[] { 0.30f, 0.59f, 0.11f, 0, 0 },
+                            new[] { 0.30f, 0.59f, 0.11f, 0, 0 },
+                            new[] { 0f, 0f, 0f, 0.55f, 0 },
+                            new[] { 0f, 0f, 0f, 0f, 1f },
+                        }));
+                        g.DrawImage(picture, new Rectangle((int)box.X, (int)box.Y, (int)box.Width, (int)box.Height),
+                            0, 0, picture.Width, picture.Height, GraphicsUnit.Pixel, attributes);
+                    }
+                    else g.DrawImage(picture, box, new RectangleF(0, 0, picture.Width, picture.Height),
+                        GraphicsUnit.Pixel);
+                }
+                else
+                {
+                    using var empty = new SolidBrush(Color.FromArgb(45, 49, 55));
+                    g.FillEllipse(empty, box);
+                }
+                g.Clip = old;
+            }
+            using (var rim = new Pen(banned ? Dim : Color.FromArgb(190, 198, 205), Math.Max(1f, 0.0016f * h)))
+                g.DrawEllipse(rim, box);
+            if (banned)
+            {
+                using var cross = new Pen(Color.FromArgb(220, 75, 75), Math.Max(1.5f, 0.0022f * h));
+                g.DrawLine(cross, box.X + icon * 0.24f, box.Y + icon * 0.24f,
+                    box.Right - icon * 0.24f, box.Bottom - icon * 0.24f);
+                g.DrawLine(cross, box.Right - icon * 0.24f, box.Y + icon * 0.24f,
+                    box.X + icon * 0.24f, box.Bottom - icon * 0.24f);
+            }
+            using var ink = new SolidBrush(banned ? Dim : Ink);
+            g.DrawString(Tribes.ShortName(tribe), font, ink,
+                new RectangleF(x + i * cell, y + 0.043f * h, cell, 0.014f * h), center);
+        }
     }
 
     /// <summary>
@@ -1045,14 +1099,14 @@ internal sealed class OverlayForm : Form
             new ChoiceOption(i, "", $"Пример {i + 1}"), tiers[i], 3.6 + 0.3 * i,
             kind == ChoiceKind.Hero ? "топ-4 55% · 1-е 15%" : "берут в 20%",
             kind == ChoiceKind.Hero ? "любит: Звери, Драконы" : null)).ToList();
-        var panel = new List<PanelLine>
+        var games = new[]
         {
-            PanelLine.Title("Вечная Токи", "B", TierColor("B"), "TB_BaconShop_HERO_28"),
-            PanelLine.Section("Расы в лобби"),
-            PanelLine.Note("Звери, Драконы, Нежить, Пираты, Демоны", Muted),
-            PanelLine.Section("Забанены"),
-            PanelLine.Note("Мурлоки, Механизмы, Элементали, Свинобразы, Наги, Аберрации", Muted),
+            new HistoryRow("4", Bad, "TB_BaconShop_HERO_28", "Дорнозму Освобожденный", "", "16:08", "-24", Bad, "", []),
+            new HistoryRow("1", Good, "BG31_HERO_005", "Воевода Саурфанг", "", "16:02", "+82", Good, "", []),
+            new HistoryRow("4", Bad, "TB_BaconShop_HERO_28", "Пирамидон", "", "15:54", "+0", Muted, "", []),
         };
+        var panel = new LobbyPanel(
+            [15, 24, 20, 14, 18], [11, 17, 43, 92, 126, 23], 6082, 6082, games);
         var banner = new WinBanner(false, "30%", "420 против 310", 0.30, 0.60, 0.10,
             "с союзником 78%  ·  730 против 310", 0.78);
         return new OverlayModel(kind, items, "Пример расположения — подгоните высоту в окне", panel, banner,
@@ -1084,11 +1138,11 @@ internal sealed class OverlayForm : Form
         string[] heroes = { "Вечная Токи", "Клонист Зерек", "Вечная Токи", "Клонист Зерек" };
         string[] heroCards = { "TB_BaconShop_HERO_28", "BG31_HERO_005", "TB_BaconShop_HERO_28", "BG31_HERO_005" };
         int[] places = { 1, 2, 4, 3 };
-        string[] deltas = { "+92", "+41", "-58", "-12" };
+        string[] deltas = { "+92", "+0", "-58", "-12" };
         var rows = Enumerable.Range(0, 4).Select(i => new HistoryRow(
             places[i].ToString(), PlaceColor(places[i], duo: true), heroCards[i], heroes[i],
             "дуэты · Нежить, Механизмы, Аберрации, Драконы, Звери",
-            $"2{1 + i}:0{i}", deltas[i], deltas[i][0] == '+' ? Good : Bad,
+            $"2{1 + i}:0{i}", deltas[i], deltas[i] == "+0" ? Muted : deltas[i][0] == '+' ? Good : Bad,
             $"{places[i]} место · ход {14 - i} · {5000 - i * 900} ат.+зд.",
             i == 2 ? cards.Take(5).ToList() : cards)).ToList();
         var panel = new HistoryPanel("Рейтинг 8420", "ср. место 2,5", rows, 1, new RatingToday(8357, 8420, 4));
