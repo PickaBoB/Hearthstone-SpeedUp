@@ -20,6 +20,7 @@ internal sealed class BattlegroundsPanel : UserControl
     private readonly CardArt     _art = new();
     private readonly OverlayForm _overlay = new();
     private readonly SpeedStripForm _speedStrip = new();
+    private readonly ReconnectService _reconnect = new();
     private readonly System.Windows.Forms.Timer _tick = new() { Interval = 250 };
     private readonly System.Windows.Forms.Timer _refresh = new() { Interval = 30 * 60 * 1000 };
 
@@ -28,12 +29,12 @@ internal sealed class BattlegroundsPanel : UserControl
     private readonly Label    _statsLabel = new();
     private readonly ComboBox _mmr = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly CheckBox _enabled = new() { Text = "Показывать оверлей поверх игры", AutoSize = true };
-    private readonly CheckBox _speedOn = new() { Text = "Кнопки скорости в игре (справа снизу)", AutoSize = true };
+    private readonly CheckBox _speedOn = new() { Text = "Кнопки скорости и реконнекта в игре (справа снизу)", AutoSize = true };
     private readonly ComboBox _preview = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly NumericUpDown _heroY = new();
     private readonly NumericUpDown _trinketY = new();
     private readonly NumericUpDown _panelY = new();
-    private readonly NumericUpDown _bannerY = new();
+    private readonly NumericUpDown _boardY = new();
     private readonly CheckBox _panelOn = new() { Text = "Панель слева", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly CheckBox _peekOn = new() { Text = "Доска по наведению", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly CheckBox _turnOn = new() { Text = "Ход справа сверху", AutoSize = true, Anchor = AnchorStyles.Left };
@@ -58,6 +59,8 @@ internal sealed class BattlegroundsPanel : UserControl
     private long _nextWindowLookup;
     private bool _fillingMmr;
     private bool _statsStarted;
+    private ReconnectVisual _reconnectVisual;
+    private long _reconnectNoticeUntil;
     private readonly string _configNote;
 
     /// <summary>The speed the main window has in force; the strip lights it.</summary>
@@ -65,6 +68,8 @@ internal sealed class BattlegroundsPanel : UserControl
 
     /// <summary>A missing-log warning, also shown on the main speed tab.</summary>
     public string OverlayNotice { get; private set; } = "";
+
+    public string ReconnectNotice { get; private set; } = "";
 
     /// <summary>A speed button over the game was clicked.</summary>
     public event Action<double>? SpeedPicked;
@@ -77,6 +82,7 @@ internal sealed class BattlegroundsPanel : UserControl
         _configNote = SafeEnsureLogging();
         _overlay.Art = _art;
         _speedStrip.SpeedPicked += v => SpeedPicked?.Invoke(v);
+        _speedStrip.ReconnectPicked += async () => await Reconnect();
         BuildLayout();
 
         _tick.Tick += (_, _) => Tick();
@@ -155,7 +161,7 @@ internal sealed class BattlegroundsPanel : UserControl
         SetupY(_heroY, Settings.Current.HeroBadgeY, v => Settings.Current.HeroBadgeY = v);
         SetupY(_trinketY, Settings.Current.TrinketBadgeY, v => Settings.Current.TrinketBadgeY = v);
         SetupY(_panelY, Settings.Current.PanelY, v => Settings.Current.PanelY = v);
-        SetupY(_bannerY, Settings.Current.BannerY, v => Settings.Current.BannerY = v);
+        SetupY(_boardY, Settings.Current.BoardY, v => Settings.Current.BoardY = v);
         _panelOn.Checked = Settings.Current.PanelEnabled;
         _panelOn.CheckedChanged += (_, _) =>
         {
@@ -189,8 +195,8 @@ internal sealed class BattlegroundsPanel : UserControl
         grid.Controls.Add(_heroY, 1, 0);
         grid.Controls.Add(new Label { Text = "Аксессуары", AutoSize = true, Anchor = AnchorStyles.Left }, 2, 0);
         grid.Controls.Add(_trinketY, 3, 0);
-        grid.Controls.Add(new Label { Text = "Шанс боя", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1);
-        grid.Controls.Add(_bannerY, 1, 1);
+        grid.Controls.Add(new Label { Text = "Доска сверху", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1);
+        grid.Controls.Add(_boardY, 1, 1);
         grid.Controls.Add(_panelOn, 2, 1);
         grid.Controls.Add(_panelY, 3, 1);
         grid.Controls.Add(_peekOn, 0, 2);
@@ -268,6 +274,27 @@ internal sealed class BattlegroundsPanel : UserControl
         _lastKey = "";
     }
 
+    private async Task Reconnect()
+    {
+        if (_reconnect.Busy) return;
+        _reconnectVisual = ReconnectVisual.Busy;
+        _reconnectNoticeUntil = 0;
+        ReconnectNotice = "Автореконнект: соединение восстановится автоматически через 1 секунду.";
+        try
+        {
+            await _reconnect.ReconnectAsync(_hsProcess);
+            _reconnectVisual = ReconnectVisual.Ready;
+            ReconnectNotice = "Автореконнект: соединение восстановлено.";
+            _reconnectNoticeUntil = Environment.TickCount64 + 4000;
+        }
+        catch (Exception ex)
+        {
+            _reconnectVisual = ReconnectVisual.Error;
+            ReconnectNotice = "Автореконнект: " + ex.Message.Split('\n')[0].TrimEnd('\r');
+            _reconnectNoticeUntil = Environment.TickCount64 + 8000;
+        }
+    }
+
     // ---- tick --------------------------------------------------------
 
     private void Tick()
@@ -282,11 +309,18 @@ internal sealed class BattlegroundsPanel : UserControl
             _statsStarted = true;
             _ = LoadStats(force: false);
         }
+        if (_reconnectNoticeUntil > 0 && Environment.TickCount64 >= _reconnectNoticeUntil)
+        {
+            _reconnectNoticeUntil = 0;
+            _reconnectVisual = ReconnectVisual.Ready;
+            ReconnectNotice = "";
+        }
 
         IntPtr hs = FindGameWindow();
         _reader.Parser.ScreenActive(hs != IntPtr.Zero && !Native.IsIconic(hs));
-        GameSnapshot snap = _reader.Parser.Snapshot();
         _rating.Poll(_hsProcess);
+        _reader.Parser.SetAvailableRaces(_rating.Races);
+        GameSnapshot snap = _reader.Parser.Snapshot();
         _lobbyNames.Poll(_hsProcess);
         TrackRatingSession(snap);
         // The rating moves between games, so each game is bracketed by the
@@ -327,7 +361,7 @@ internal sealed class BattlegroundsPanel : UserControl
         // The speed buttons are not part of the overlay's model: they earn
         // their corner whenever the game is up, in and out of Battlegrounds.
         _speedStrip.Present(up && front && Settings.Current.SpeedButtonsEnabled ? client : Rectangle.Empty,
-            CurrentSpeed);
+            CurrentSpeed, _reconnectVisual);
     }
 
     private int HoverRow(Rectangle client)
@@ -397,7 +431,7 @@ internal sealed class BattlegroundsPanel : UserControl
         sb.Append(_preview.SelectedIndex).Append('|').Append(_stats.Version).Append('|')
           .Append(_history.Version).Append('|').Append(_hoverRow).Append('|')
           .Append(_rating.Solo).Append('/').Append(_rating.Duo).Append('|')
-          .Append(_lobbyNames.Version).Append('|')
+          .Append(_rating.RacesVersion).Append('|').Append(_lobbyNames.Version).Append('|')
           .Append(CurrentSession()).Append('|')
           .Append(_art.Version).Append('|').Append(_peekSlot).Append('|')
           .Append(string.Join(",", (s.Seen ?? []).Select(b => $"{b.PlayerId}:{b.Turn}:{b.Stats}"))).Append('|')
@@ -428,9 +462,7 @@ internal sealed class BattlegroundsPanel : UserControl
         if (_preview.SelectedIndex > 0)
             return OverlayForm.Sample(_preview.SelectedIndex == 1 ? ChoiceKind.Hero : ChoiceKind.LesserTrinket);
         if (OverlayNotice.Length > 0)
-            return new OverlayModel(null, [], "", Banner: new WinBanner(true,
-                "Перезапустите Hearthstone", "Оверлею нужен Power.log текущего запуска игры",
-                null, null, null));
+            return new OverlayModel(null, [], "");
         // The same session recap stays on screen between games.
         if (!snap.InBattlegrounds)
             return new OverlayModel(null, [], "", BuildPanel(snap));
@@ -438,12 +470,11 @@ internal sealed class BattlegroundsPanel : UserControl
         // The turn, for the corner plate: the game shows it nowhere itself.
         string turn = snap.Turn > 0 ? $"Ход {snap.Turn}" : "";
         var peekNow = BuildPeek(snap);
-        // The hovered board takes the combat banner's place until the pointer leaves.
-        WinBanner? banner = peekNow is null ? BuildBanner(snap) : null;
         // The hero pick has its own badges and no hero to describe yet.
         var panel = snap.Choice?.Kind == ChoiceKind.Hero ? null : BuildPanel(snap);
         var buffs = snap.InCombat ? null : snap.Buffs;
-        if (snap.Choice is null) return new OverlayModel(null, [], "", panel, banner, null, peekNow, turn, buffs);
+        if (snap.Choice is null)
+            return new OverlayModel(null, [], "", panel, Peek: peekNow, Turn: turn, Buffs: buffs);
 
         var items = Rating.Rate(snap.Choice, snap, _stats);
         string header;
@@ -458,27 +489,7 @@ internal sealed class BattlegroundsPanel : UserControl
             header = (snap.Choice.Kind == ChoiceKind.LesserTrinket ? "Малый" : "Большой") + " аксессуар";
         }
         header += $" · {MmrCaption()}";
-        return new OverlayModel(snap.Choice.Kind, items, header, panel, banner, null, peekNow, turn, buffs);
-    }
-
-    private static WinBanner? BuildBanner(GameSnapshot snap)
-    {
-        if (snap.Choice?.Kind == ChoiceKind.Hero) return null;
-        if (!snap.InCombat) return null;
-        if (snap.CombatWaiting || snap.Combat is null)
-            return new WinBanner(true, "Бой начинается…", "ждём выход карт", null, null, null);
-
-        // In duos the figure waits for the second enemy board on screen and
-        // for both teams' boards in the data. In solo the pairing is the
-        // fight, shown at once.
-        if (snap.IsDuo && !snap.CombatBoardsReady)
-            return new WinBanner(true, "Бой идёт…", "ждём все доски", null, null, null);
-
-        var g = (snap.CombatOverall ?? snap.Combat).Guess();
-        if (g.Waiting) return new WinBanner(true, "Считаю бой…", g.Status, null, null, null);
-        // "≈" until the full simulator answers; bare figure once it has.
-        string sub = $"{g.MyStats} против {g.TheirStats}" + (g.Exact ? "" : "  ·  ≈");
-        return new WinBanner(false, $"{g.Win!.Value * 100:0}%", sub, g.Win, g.Tie, g.Lose);
+        return new OverlayModel(snap.Choice.Kind, items, header, panel, Peek: peekNow, Turn: turn, Buffs: buffs);
     }
 
     private void TrackRatingSession(GameSnapshot snap)
@@ -664,15 +675,6 @@ internal sealed class BattlegroundsPanel : UserControl
     {
         if (m is null) return "Жду игру в Полях сражений.";
         var sb = new StringBuilder();
-        if (m.Banner is { } b)
-        {
-            sb.AppendLine(b.Waiting ? b.Title : $"Шанс боя: {b.Title}");
-            if (!b.Waiting && b.Tie is double tie && b.Lose is double lose)
-                sb.AppendLine($"Ничья {tie * 100:0}% · поражение {lose * 100:0}%");
-            if (b.Sub.Length > 0) sb.AppendLine(b.Sub);
-            if (b.Team.Length > 0) sb.AppendLine(b.Team);
-            sb.AppendLine();
-        }
         if (m.History is { Rows.Count: > 0 } past)
         {
             sb.AppendLine($"{past.Title} — {past.Note}");
@@ -749,13 +751,17 @@ internal sealed class BattlegroundsPanel : UserControl
             };
             _game.Text = mode + phase;
         }
+        if (ReconnectNotice.Length > 0)
+            _game.Text = ReconnectNotice + "\n" + _game.Text;
 
         if (!snap.InBattlegrounds)
             _tribes.Text = "";
+        else if (snap.TribesConfident)
+            _tribes.Text = "Расы лобби: " + string.Join(", ", snap.Tribes.Select(Tribes.Name));
         else if (snap.TribeCounts.Count == 0)
-            _tribes.Text = "Расы лобби: определятся по существам в таверне.";
+            _tribes.Text = "Расы лобби: жду данных от игры.";
         else
-            _tribes.Text = "Расы лобби" + (snap.TribesConfident ? ": " : " (предварительно): ")
+            _tribes.Text = "Расы лобби (предварительно): "
                 + string.Join(", ", snap.Tribes.Select(Tribes.Name));
 
         if (_stats.Loading)
@@ -805,6 +811,7 @@ internal sealed class BattlegroundsPanel : UserControl
             _lobbyNames.Dispose();
             _art.Dispose();
             _reader.Dispose();
+            _reconnect.Dispose();
             _overlay.Dispose();
             _speedStrip.Dispose();
         }

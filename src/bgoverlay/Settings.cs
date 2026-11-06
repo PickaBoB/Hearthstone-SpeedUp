@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace BgOverlay;
 
@@ -10,8 +11,9 @@ internal sealed class Settings
     /// <summary>Badge row heights, as a share of the game window's height.</summary>
     public double  HeroBadgeY     { get; set; } = 0.20;
     public double  TrinketBadgeY  { get; set; } = 0.20;
-    /// <summary>Height of the win-chance banner over the play area.</summary>
-    public double  BannerY        { get; set; } = 0.018;
+    /// <summary>Height of the hovered-board strip over the play area.</summary>
+    [JsonPropertyName("BannerY")]
+    public double  BoardY         { get; set; } = 0.018;
     public bool    PanelEnabled   { get; set; } = true;
 
     /// <summary>

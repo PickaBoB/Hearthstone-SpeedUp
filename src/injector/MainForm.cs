@@ -334,6 +334,7 @@ public sealed class MainForm : Form
             ? (hs.HasFlag(SharedCtl.HsState.Fast) ? "идёт действие" : "простой, x1")
             : "";
         _actual.Text = $"Сейчас: x{_ctl.Actual:0.00}" + (phase.Length > 0 ? $"  ({phase})" : "")
+            + (_bacon.ReconnectNotice.Length > 0 ? "\n" + _bacon.ReconnectNotice : "")
             + (_bacon.OverlayNotice.Length > 0 ? "\n" + _bacon.OverlayNotice : "");
     }
 

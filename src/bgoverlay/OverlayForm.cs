@@ -28,16 +28,12 @@ public sealed record PeekBoard(string HeroCard, Color Ink,
 /// <summary>The boards and tavern progress to show over the play area.</summary>
 public sealed record BoardPeek(IReadOnlyList<PeekBoard> Boards);
 
-public sealed record WinBanner(bool Waiting, string Title, string Sub, double? Win, double? Tie, double? Lose,
-    string Team = "", double? TeamWin = null);
-
-/// <summary>Badges over a pending choice, a top winrate banner, and/or the side panel.</summary>
+/// <summary>Badges over a pending choice and/or the side panel.</summary>
 public sealed record OverlayModel(
     ChoiceKind? Kind,
     IReadOnlyList<RatedOption> Items,
     string Header,
     LobbyPanel? Panel = null,
-    WinBanner? Banner = null,
     HistoryPanel? History = null,
     BoardPeek? Peek = null,
     string Turn = "",
@@ -144,7 +140,6 @@ internal sealed class OverlayForm : Form
         float h = size.Height, w = size.Width;
         if (model.History is { Rows.Count: > 0 } history) DrawHistory(g, history, art, size, h);
         if (model.Peek is { Boards.Count: > 0 } peek) DrawPeek(g, peek, art, size, h);
-        if (model.Banner is { } banner) DrawBanner(g, banner, w, h);
         if (model.Panel is { } panel && Settings.Current.PanelEnabled) DrawPanel(g, panel, art, size, h);
         if (model.Turn.Length > 0 && Settings.Current.TurnEnabled) DrawTurn(g, model.Turn, size, h);
         if (model.Buffs is { Count: > 0 } buffs) DrawBuffs(g, buffs, art, size, h);
@@ -196,73 +191,6 @@ internal sealed class OverlayForm : Form
 
         using var ink = new SolidBrush(Ink);
         g.DrawString(text, font, ink, box.X + padX, box.Y + padY, tight);
-    }
-
-    /// <summary>Centered over the top of the play area, above the opponent.</summary>
-    private static void DrawBanner(Graphics g, WinBanner b, float w, float h)
-    {
-        float bw = 0.40f * h, bh = (b.Waiting ? 0.086f : 0.065f) * h;
-        var box = new RectangleF((w - bw) / 2, (float)(Settings.Current.BannerY * h), bw, bh);
-        using var bg = new SolidBrush(Back);
-        using var edge = new Pen(Edge, Math.Max(1f, 0.0012f * h));
-        g.FillRectangle(bg, box);
-        if (b.Waiting)
-        {
-            using var bar = new SolidBrush(Color.FromArgb(78, 84, 102));
-            g.FillRectangle(bar, box.X, box.Y, box.Width, 0.005f * h);
-        }
-        else
-        {
-            Color[] accents = { Color.FromArgb(76, 217, 100), Color.FromArgb(240, 176, 64), Color.FromArgb(230, 80, 70) };
-            float stripeW = box.Width / accents.Length;
-            for (int i = 0; i < accents.Length; i++)
-            {
-                using var bar = new SolidBrush(accents[i]);
-                g.FillRectangle(bar, box.X + i * stripeW, box.Y,
-                    i == accents.Length - 1 ? box.Width - i * stripeW : stripeW, 0.005f * h);
-            }
-        }
-        g.DrawRectangle(edge, box.X, box.Y, box.Width, box.Height);
-
-        using var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-
-        if (b.Waiting)
-        {
-            using var waitFont = new Font("Segoe UI", 0.021f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var subFont = new Font("Segoe UI", 0.0135f * h, FontStyle.Regular, GraphicsUnit.Pixel);
-            using var waitInk = new SolidBrush(Muted);
-            using var subInk = new SolidBrush(Dim);
-            g.DrawString(b.Title, waitFont, waitInk,
-                new RectangleF(box.X, box.Y + 0.016f * h, box.Width, 0.030f * h), center);
-            g.DrawString(b.Sub, subFont, subInk,
-                new RectangleF(box.X, box.Y + 0.048f * h, box.Width, 0.024f * h), center);
-            return;
-        }
-
-        using var percentFont = new Font("Segoe UI", 0.030f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var labelFont = new Font("Segoe UI", 0.0135f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-
-        string tie = b.Tie is double t ? $"{t * 100:0}%" : "—";
-        string lose = b.Lose is double l ? $"{l * 100:0}%" : "—";
-        (string Value, string Label, Color Ink)[] parts =
-        {
-            (b.Title, "Победа", Color.FromArgb(76, 217, 100)),
-            (tie, "Ничья", Color.FromArgb(240, 176, 64)),
-            (lose, "Поражение", Color.FromArgb(230, 80, 70)),
-        };
-        float partW = box.Width / parts.Length;
-        for (int i = 0; i < parts.Length; i++)
-        {
-            float x = box.X + i * partW;
-            using var ink = new SolidBrush(parts[i].Ink);
-            g.DrawString(parts[i].Value, percentFont, ink,
-                new RectangleF(x, box.Y + 0.007f * h, partW, 0.034f * h), center);
-            g.DrawString(parts[i].Label, labelFont, ink,
-                new RectangleF(x, box.Y + 0.040f * h, partW, 0.018f * h), center);
-            if (i > 0)
-                using (var separator = new Pen(Edge, Math.Max(1f, 0.0011f * h)))
-                    g.DrawLine(separator, x, box.Y + 0.012f * h, x, box.Y + 0.056f * h);
-        }
     }
 
     /// <summary>
@@ -587,7 +515,7 @@ internal sealed class OverlayForm : Form
         float pad = 0.006f * h, content = 0.052f * h;
         float portrait = 0.046f * h, oval = 0.044f * h, gap = 0.005f * h;
         float tierCell = 0.041f * h, rowH = 2 * pad + content;
-        float y = (float)(Settings.Current.BannerY * h);
+        float y = (float)(Settings.Current.BoardY * h);
 
         SmoothingMode was = g.SmoothingMode;
         g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -1107,15 +1035,17 @@ internal sealed class OverlayForm : Form
         };
         var panel = new LobbyPanel(
             [15, 24, 20, 14, 18], [11, 17, 43, 92, 126, 23], 6082, 6082, games);
-        var banner = new WinBanner(false, "30%", "420 против 310", 0.30, 0.60, 0.10,
-            "с союзником 78%  ·  730 против 310", 0.78);
-        return new OverlayModel(kind, items, "Пример расположения — подгоните высоту в окне", panel, banner,
+        return new OverlayModel(kind, items, "Пример расположения — подгоните высоту в окне", panel,
             Turn: "Ход 8", Buffs:
             [
                 new BattlegroundsBuff(BattlegroundsBuffKind.Undead, 12, 0),
                 new BattlegroundsBuff(BattlegroundsBuffKind.TavernSpells, 4, 8),
                 new BattlegroundsBuff(BattlegroundsBuffKind.Beetles, 14, 10),
                 new BattlegroundsBuff(BattlegroundsBuffKind.BloodGems, 3, 5),
+                new BattlegroundsBuff(BattlegroundsBuffKind.Nomi, 7, 7),
+                new BattlegroundsBuff(BattlegroundsBuffKind.Volumizers, 5, 9),
+                new BattlegroundsBuff(BattlegroundsBuffKind.GoldNextTurn, 4, 0),
+                new BattlegroundsBuff(BattlegroundsBuffKind.FreeRerolls, 3, 0),
             ]);
     }
 
@@ -1146,7 +1076,7 @@ internal sealed class OverlayForm : Form
             $"{places[i]} место · ход {14 - i} · {5000 - i * 900} ат.+зд.",
             i == 2 ? cards.Take(5).ToList() : cards)).ToList();
         var panel = new HistoryPanel("Рейтинг 8420", "ср. место 2,5", rows, 1, new RatingToday(8357, 8420, 4));
-        return new OverlayModel(null, [], "", null, null, panel);
+        return new OverlayModel(null, [], "", History: panel);
     }
 
     /// <summary>A board under a portrait, for looking at it without playing.</summary>
@@ -1171,7 +1101,7 @@ internal sealed class OverlayForm : Form
             new PeekBoard("BG31_HERO_005", Ink, cards.Take(5).ToList(), 5,
                 [new(1, 1), new(2, 2), new(3, 4), new(4, 7), new(5, 10)]),
         ]);
-        return new OverlayModel(null, [], "", null, null, null, peek);
+        return new OverlayModel(null, [], "", Peek: peek);
     }
 
     public static Color TierColor(string tier) => tier switch

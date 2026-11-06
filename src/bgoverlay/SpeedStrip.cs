@@ -3,12 +3,14 @@ using System.Drawing.Imaging;
 
 namespace BgOverlay;
 
+internal enum ReconnectVisual { Ready, Busy, Error }
+
 /// <summary>
 /// The row of speed buttons over the bottom right corner of the game:
-/// x1 · x2 · x3 · x8, the picked one lit. Unlike the main overlay this
-/// window is NOT click-through — the whole point is that it takes the
-/// click — but it is still a layered window, so the transparent pixels
-/// around the pills let the game's own clicks through.
+/// x1 · x2 · x3 · x8, the picked one lit, then a reconnect button. Unlike
+/// the main overlay this window is NOT click-through — the whole point is
+/// that it takes the click — but it is still a layered window, so the
+/// transparent pixels around the pills let the game's own clicks through.
 ///
 /// It is kept apart from OverlayForm rather than made a hole in its
 /// click-through style: toggling WS_EX_TRANSPARENT under a moving cursor
@@ -23,7 +25,10 @@ internal sealed class SpeedStripForm : Form
     /// <summary>A button was clicked: the multiplier it stands for.</summary>
     public event Action<double>? SpeedPicked;
 
+    public event Action? ReconnectPicked;
+
     private double _current = 1.0;
+    private ReconnectVisual _reconnect;
     private int _hover = -1;
     private RectangleF[] _boxes = Array.Empty<RectangleF>();
 
@@ -32,6 +37,7 @@ internal sealed class SpeedStripForm : Form
     private static readonly Color Band  = Color.FromArgb(240, 32, 34, 46);
     private static readonly Color Frame = Color.FromArgb(74, 80, 100);
     private static readonly Color On    = Color.FromArgb(255, 196, 70);
+    private static readonly Color Error = Color.FromArgb(190, 55, 65);
 
     public SpeedStripForm()
     {
@@ -61,7 +67,7 @@ internal sealed class SpeedStripForm : Form
     /// Lays the strip over the bottom right of the game's play area and
     /// redraws it when anything it shows has moved. An empty rect hides it.
     /// </summary>
-    public void Present(Rectangle gameClient, double current)
+    public void Present(Rectangle gameClient, double current, ReconnectVisual reconnect)
     {
         if (gameClient.Width < 100 || gameClient.Height < 100)
         {
@@ -85,8 +91,9 @@ internal sealed class SpeedStripForm : Form
 
         bool moved = Bounds != new Rectangle(at, size);
         if (moved) Bounds = new Rectangle(at, size);
-        bool changed = moved || Math.Abs(current - _current) > 0.001;
+        bool changed = moved || Math.Abs(current - _current) > 0.001 || reconnect != _reconnect;
         _current = current;
+        _reconnect = reconnect;
         if (changed) Render();
         if (!Visible) Show();
     }
@@ -94,19 +101,21 @@ internal sealed class SpeedStripForm : Form
     /// <summary>The strip's pixel size at a game window of this height.</summary>
     private static Size StripSize(float h)
     {
+        int count = Presets.Length + 1;
         float pad = 0.006f * h, gap = 0.005f * h, bh = 0.034f * h, bw = 0.048f * h;
-        return new Size((int)MathF.Round(2 * pad + Presets.Length * bw + (Presets.Length - 1) * gap),
+        return new Size((int)MathF.Round(2 * pad + count * bw + (count - 1) * gap),
                         (int)MathF.Round(bh + 2 * pad));
     }
 
     /// <summary>The button boxes for a strip of this size. Mirrors the drawing.</summary>
     private static RectangleF[] Boxes(Size size)
     {
+        int count = Presets.Length + 1;
         float pad = 0.130f * size.Height;
         float bh = size.Height - 2 * pad;
         float bw = 1.41f * bh;
-        float gap = (size.Width - 2 * pad - Presets.Length * bw) / (Presets.Length - 1);
-        var boxes = new RectangleF[Presets.Length];
+        float gap = (size.Width - 2 * pad - count * bw) / (count - 1);
+        var boxes = new RectangleF[count];
         float x = pad;
         for (int i = 0; i < boxes.Length; i++)
         {
@@ -123,7 +132,7 @@ internal sealed class SpeedStripForm : Form
         using (Graphics g = Graphics.FromImage(picture))
         {
             g.Clear(Color.Transparent);
-            Draw(g, ClientSize, _current, _hover, out _boxes);
+            Draw(g, ClientSize, _current, _reconnect, _hover, out _boxes);
         }
         Native.ShowLayered(Handle, picture);
     }
@@ -133,9 +142,9 @@ internal sealed class SpeedStripForm : Form
 
     /// <summary>
     /// The strip on any surface of its size: one pill per preset, the
-    /// current one lit, the hovered one lifted a shade.
+    /// current one lit, the hovered one lifted a shade, then reconnect.
     /// </summary>
-    internal static void Draw(Graphics g, Size size, double current, int hover,
+    internal static void Draw(Graphics g, Size size, double current, ReconnectVisual reconnect, int hover,
         out RectangleF[] boxes)
     {
         boxes = Boxes(size);
@@ -143,6 +152,7 @@ internal sealed class SpeedStripForm : Form
         float radius = 0.24f * boxes[0].Height;
 
         using var font = new Font("Segoe UI", 0.46f * boxes[0].Height, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var reconnectFont = new Font("Segoe UI Symbol", 0.54f * boxes[0].Height, FontStyle.Bold, GraphicsUnit.Pixel);
         using var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
         using var rim = new Pen(Frame, Math.Max(1f, 0.04f * h));
 
@@ -151,13 +161,22 @@ internal sealed class SpeedStripForm : Form
 
         for (int i = 0; i < boxes.Length; i++)
         {
-            bool on = Math.Abs(Presets[i] - current) < 0.001;
+            bool speed = i < Presets.Length;
+            bool on = speed && Math.Abs(Presets[i] - current) < 0.001;
+            Color back = !speed && reconnect == ReconnectVisual.Error ? Error
+                : on ? On : i == hover ? Band : Back;
             using GraphicsPath pill = Pill(boxes[i], radius);
-            using (var fill = new SolidBrush(on ? On : i == hover ? Band : Back))
+            using (var fill = new SolidBrush(back))
                 g.FillPath(fill, pill);
             g.DrawPath(rim, pill);
             using var ink = new SolidBrush(on ? Color.Black : Ink);
-            g.DrawString($"x{Presets[i]:0}", font, ink, boxes[i], center);
+            string text = speed ? $"x{Presets[i]:0}" : reconnect switch
+            {
+                ReconnectVisual.Busy => "…",
+                ReconnectVisual.Error => "!",
+                _ => "↻",
+            };
+            g.DrawString(text, speed ? font : reconnectFont, ink, boxes[i], center);
         }
     }
 
@@ -186,6 +205,14 @@ internal sealed class SpeedStripForm : Form
         if (e.Button != MouseButtons.Left) return;
         int i = Hit(e.Location);
         if (i < 0) return;
+        if (i == Presets.Length)
+        {
+            if (_reconnect == ReconnectVisual.Busy) return;
+            _reconnect = ReconnectVisual.Busy;
+            Render();
+            ReconnectPicked?.Invoke();
+            return;
+        }
         // Light the button at once; the main window's answer lands on the
         // next tick and only confirms what is already drawn.
         _current = Presets[i];

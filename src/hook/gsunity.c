@@ -559,7 +559,7 @@ static BOOL call_get_float(void *method, float *out)
 }
 
 /* ------------------------------------------------------------------ */
-/* Battlegrounds rating                                                */
+/* Battlegrounds rating and lobby races                                  */
 /* ------------------------------------------------------------------ */
 
 /* The rating is nowhere in the logs, but the client keeps it with the rest
@@ -569,11 +569,12 @@ static BOOL call_get_float(void *method, float *out)
  * fields of its properties. Everything here is a plain read off the managed
  * heap; the only call is NetCache.Get(), once.
  *
- * The numbers go into a section of their own, Local\BgOverlayRating_<pid>,
- * so the overlay can pick them up without the two builds having to agree on
- * the layout of the control block. */
+ * The ratings and GameState's authoritative lobby race list go into a section
+ * of their own, Local\BgOverlayRating_<pid>, so the overlay can pick them up
+ * without the two builds having to agree on the layout of the control block. */
 
 #define BACON_MAGIC 0x54524742u   /* "BGRT" */
+#define BACON_MAX_RACES 8
 
 #pragma pack(push, 1)
 typedef struct {
@@ -582,6 +583,8 @@ typedef struct {
     INT32  solo;
     INT32  duo;
     UINT32 seq;       /* bumped on every change, so a reader sees movement */
+    INT32  race_count;
+    INT32  races[BACON_MAX_RACES];
 } BaconShared;
 #pragma pack(pop)
 
@@ -594,6 +597,7 @@ static struct {
     void *f_netcache;          /* NetCache.m_netCache, a Map<Type, object> */
     void *rating_class;
     void *f_solo, *f_duo;
+    void *f_races;             /* GameState.m_availableRacesInBattlegroundsExcludingAmalgam */
 } bacon;
 
 static void open_bacon_shared(void)
@@ -607,7 +611,7 @@ static void open_bacon_shared(void)
     g_bacon = (BaconShared*)MapViewOfFile(g_bacon_handle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(BaconShared));
     if (!g_bacon) return;
     g_bacon->magic   = BACON_MAGIC;
-    g_bacon->version = 1;
+    g_bacon->version = 2;
 }
 
 /* A managed array's elements. MonoArray is MonoObject (vtable, sync) then
@@ -629,6 +633,8 @@ static BOOL bacon_bind(void)
 {
     void *netcache_class, *get, *exc = NULL;
 
+    if (hs.gs_class && !bacon.f_races)
+        bacon.f_races = rt.field_from_name(hs.gs_class, "m_availableRacesInBattlegroundsExcludingAmalgam");
     if (bacon.ready) return TRUE;
     if (!rt.object_get_class || !rt.object_isinst) return FALSE;
 
@@ -681,15 +687,65 @@ static BOOL bacon_read(INT32 *solo, INT32 *duo)
     return FALSE;   /* the cache has no rating yet: not signed in, or not fetched */
 }
 
+/* The client knows all five lobby races before the hero choice. This list is
+ * authoritative, unlike counting the races of minions that happen to appear. */
+static BOOL bacon_read_races(INT32 *races, INT32 *race_count)
+{
+    void *gs = NULL, *list = NULL, *items_array = NULL;
+    void *list_class, *f_items, *f_size;
+    INT32 *items;
+    INT32 size = 0;
+    size_t capacity, n, i;
+
+    *race_count = 0;
+    if (!bacon.f_races || !rt.object_get_class) return FALSE;
+    if (!read_static(hs.gs_class, hs.f_gs_instance, &gs) || !gs) return FALSE;
+    rt.field_get_value(gs, bacon.f_races, &list);
+    if (!list) return TRUE;
+
+    list_class = rt.object_get_class(list);
+    f_items = list_class ? rt.field_from_name(list_class, "_items") : NULL;
+    f_size  = list_class ? rt.field_from_name(list_class, "_size") : NULL;
+    if (!f_items || !f_size) return FALSE;
+    rt.field_get_value(list, f_items, &items_array);
+    rt.field_get_value(list, f_size, &size);
+    items = (INT32*)array_items(items_array, &capacity);
+    if (!items || size <= 0) return TRUE;
+
+    n = size < (INT32)capacity ? (size_t)size : capacity;
+    if (n > BACON_MAX_RACES) n = BACON_MAX_RACES;
+    for (i = 0; i < n; i++) {
+        if (items[i] <= 0) return TRUE;   /* INVALID while the game initializes */
+        races[i] = items[i];
+    }
+    if (n < 5) return TRUE;
+    *race_count = (INT32)n;
+    return TRUE;
+}
+
 static void bacon_publish(void)
 {
-    INT32 solo = 0, duo = 0;
+    INT32 solo = 0, duo = 0, races[BACON_MAX_RACES] = {0}, race_count = 0;
+    BOOL rating_ok = bacon_read(&solo, &duo);
+    BOOL races_ok = bacon_read_races(races, &race_count);
+    BOOL rating_changed, races_changed;
 
-    if (!g_bacon || !bacon_read(&solo, &duo)) return;
-    if (g_bacon->solo == solo && g_bacon->duo == duo) return;
-    gsp_log("rating: solo=%d duo=%d", solo, duo);
-    g_bacon->solo = solo;
-    g_bacon->duo  = duo;
+    if (!g_bacon) return;
+    rating_changed = rating_ok && (g_bacon->solo != solo || g_bacon->duo != duo);
+    races_changed = races_ok && (g_bacon->race_count != race_count
+        || memcmp(g_bacon->races, races, sizeof(races)) != 0);
+    if (!rating_changed && !races_changed) return;
+
+    if (rating_ok) {
+        gsp_log("rating: solo=%d duo=%d", solo, duo);
+        g_bacon->solo = solo;
+        g_bacon->duo  = duo;
+    }
+    if (races_ok) {
+        gsp_log("lobby races: %d", race_count);
+        g_bacon->race_count = race_count;
+        memcpy(g_bacon->races, races, sizeof(races));
+    }
     g_bacon->seq++;
 }
 

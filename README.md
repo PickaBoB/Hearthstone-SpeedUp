@@ -7,8 +7,7 @@
 Скорости: **x1 · x2 · x3 · x8**. Подключается к игре сама.
 
 Во второй вкладке — **подсказки по Полям сражений** поверх игры: ранги героев
-и аксессуаров при выборе, шанс выиграть бой, сводка по своей доске и список
-прошлых игр.
+и аксессуаров при выборе, сводка по своей доске и список прошлых игр.
 
 ![Окно программы](docs/window.png)
 
@@ -17,7 +16,7 @@
 
 ## Скачать и запустить
 
-1. Скачайте [HearthstoneSpeedUp-v1.0.9.zip](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/download/v1.0.9/HearthstoneSpeedUp-v1.0.9.zip)
+1. Скачайте [HearthstoneSpeedUp-v1.0.10.zip](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/download/v1.0.10/HearthstoneSpeedUp-v1.0.10.zip)
    или откройте [последний релиз](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/latest).
 2. Распакуйте архив в отдельную папку. Оставьте вместе
    `HearthstoneSpeedUp.exe`, `gsunity64.dll` и папку `sim\` — она нужна для
@@ -29,6 +28,14 @@
 4. Дождитесь надписи «Подключено» и выберите скорость. Скорость можно
    переключать и прямо в игре: кнопки **x1 · x2 · x3 · x8** в правом нижнем
    углу (отключаются во вкладке «Поля сражений»).
+
+Кнопка **↻** справа от скоростей — **автореконнект для пропуска боя**. Она
+сбрасывает только соединение с сервером текущего матча и восстанавливает его
+через 1 секунду, не затрагивая Battle.net. Для этой кнопки программу нужно
+запустить от администратора: Windows не даёт обычному пользователю менять
+правила брандмауэра и сбрасывать TCP-соединения. Во время ожидания на кнопке
+видно `…`, при ошибке — красный `!`; подробность появится в статусе программы.
+Пока поддерживается IPv4-подключение к игровому серверу.
 
 Горячие клавиши (работают прямо из игры, переназначаются в окне — нажмите
 сочетание на вкладке «Скорость» и затем новые клавиши):
@@ -50,38 +57,23 @@
 * **при выборе героя и аксессуаров** — ранг каждого варианта и среднее место
   по статистике [Firestone](https://www.firestoneapp.com) (данные качаются сами,
   срез по рейтингу выбирается в окне);
-* **в бою** — шансы победы, ничьей и поражения в трёх цветных колонках.
-  Расклад не дёргается по ходу драки: считается один раз по доскам на поле.
-  В соло он на экране сразу; в дуэтах — после выхода второй доски соперников,
-  когда данные обеих команд уже полны, и учитывает весь оставшийся бой целиком.
-  Полный симулятор боёв от [Firestone](https://www.firestoneapp.com) проигрывает
-  бой тысячи раз по скриптам карт — предсмертные хрипы, перерождения,
-  божественные щиты, яд и слиз, «месть», аксессуары, — а не только по
-  ключевым словам. Сервис (`sim\` рядом с программой, Node.js в комплекте)
-  запускается сам на первом бою. Первую долю секунды видна быстрая оценка
-  встроенного счётчика (рядом метка «≈»), затем её подменяет точный расклад;
-  если сервиса нет, оценка просто остаётся;
 * **в таверне** — панель слева в стиле Hearthstone Deck Tracker: круглые
   иконки доступных и забаненных рас, начальный и текущий MMR, последние
   восемь игр текущей сессии;
   номер хода — отдельной плашкой в правом верхнем углу. Над монетами справа
-  показываются ненулевые усиления нежити, заклинаний таверны, жуков и
-  кровавых самоцветов — с игровыми иконками и текущими значениями;
-* **при наведении на портрет соперника** — сверху вместо шансов боя его
-  аватар и последняя увиденная доска, а также все уровни таверны с ходами,
-  на которых он их открыл; в дуэтах показываются обе доски команды, после
-  ухода курсора шансы боя возвращаются;
+  показываются ненулевые усиления нежити, заклинаний таверны, жуков,
+  кровавых самоцветов, Номи и звукорегуляторов, золото на следующий ход и
+  бесплатные обновления — с игровыми иконками и текущими значениями;
+* **при наведении на портрет соперника** — сверху его аватар и последняя
+  увиденная доска, а также все уровни таверны с ходами, на которых он их
+  открыл; в дуэтах показываются обе доски команды;
 * **между играми** — та же session-панель остаётся в меню: расы последнего
   лобби, начальный и текущий MMR и последние восемь игр с фоном героя,
   местом и изменением рейтинга.
 
 ### Примеры оверлея
 
-**Шансы боя:**
-
-![Победа, ничья и поражение в блоке шансов боя](docs/combat-odds.png)
-
-**Усиления нежити, заклинаний таверны, жуков и кровавых самоцветов:**
+**Усиления и ресурсы в таверне:**
 
 ![Индикаторы активных баффов](docs/buffs.png)
 
@@ -201,15 +193,17 @@ Ctrl+Alt+1..4 in game, with remappable hotkeys and optional in-game speed button
 The Battlegrounds overlay also provides:
 
 - hero and trinket ratings from Firestone statistics;
-- win, tie and loss chances from the full Firestone combat simulator, including Duos;
-- undead, Tavern spell, Beetle and Blood Gem buff indicators with card art;
+- undead, Tavern spell, Beetle, Blood Gem, Nomi and Volumizer buffs, plus next-turn gold and free refreshes;
 - opponent boards on leaderboard hover, lobby information and past-game history.
 
 Download the zip from
 [Releases](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/latest),
 unzip, and keep `HearthstoneSpeedUp.exe`, `gsunity64.dll` and the `sim` folder
 together. Run the exe; it finds and attaches to Hearthstone by itself. Neither
-.NET nor Node.js needs to be installed.
+.NET nor Node.js needs to be installed. The **↻** button next to the in-game
+speed presets resets only the current game server's connection and restores it
+after one second, leaving Battle.net untouched. This button requires running
+the program as administrator and currently supports IPv4 game servers.
 
 It injects a small module that sets the multiplier of the game's own
 `TimeScaleMgr` through the embedded Mono runtime, only while the client is

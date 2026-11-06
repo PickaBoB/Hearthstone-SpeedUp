@@ -57,7 +57,10 @@ public sealed record LobbyPlayer(int Place, int PlayerId, string Hero, string He
     bool Friendly, bool Alive, int Tier, SeenBoard? Board, string? PlayerName = null,
     IReadOnlyList<TavernTier>? Tavern = null);
 
-public enum BattlegroundsBuffKind { Undead, TavernSpells, Beetles, BloodGems }
+public enum BattlegroundsBuffKind
+{
+    Undead, TavernSpells, Beetles, BloodGems, Nomi, Volumizers, GoldNextTurn, FreeRerolls,
+}
 
 /// <summary>A player-wide Battlegrounds bonus, as the game tracks it.</summary>
 public sealed record BattlegroundsBuff(BattlegroundsBuffKind Kind, int Attack, int Health)
@@ -67,6 +70,10 @@ public sealed record BattlegroundsBuff(BattlegroundsBuffKind Kind, int Attack, i
         BattlegroundsBuffKind.Undead => "BG25_011",
         BattlegroundsBuffKind.TavernSpells => "BG28_168",
         BattlegroundsBuffKind.Beetles => "BG28_603t",
+        BattlegroundsBuffKind.Nomi => "BGS_104",
+        BattlegroundsBuffKind.Volumizers => "BG34_170t3",
+        BattlegroundsBuffKind.GoldNextTurn => "BG28_800",
+        BattlegroundsBuffKind.FreeRerolls => "TB_BaconShop_8p_Reroll_Button",
         _ => "BG20_GEM",
     };
 
@@ -74,6 +81,8 @@ public sealed record BattlegroundsBuff(BattlegroundsBuffKind Kind, int Attack, i
     {
         BattlegroundsBuffKind.Undead when Health == 0 => $"+{Attack}",
         BattlegroundsBuffKind.Beetles => $"{Attack}/{Health}",
+        BattlegroundsBuffKind.GoldNextTurn => Attack > 0 ? $"+{Attack}" : Attack.ToString(),
+        BattlegroundsBuffKind.FreeRerolls => Attack.ToString(),
         _ => $"+{Attack}/+{Health}",
     };
 }
@@ -136,7 +145,7 @@ public sealed class PowerLogParser
         "TAG_SCRIPT_DATA_NUM_5", "TAG_SCRIPT_DATA_NUM_6", "ATTACHED", "CREATOR", "PLAYER_TECH_LEVEL",
         "PLAYER_LEADERBOARD_PLACE",
         "EXHAUSTED", "BACON_DUO_TEAMMATE_PLAYER_ID", "COPIED_FROM_ENTITY_ID",
-        "BACON_BLOODGEMBUFFATKVALUE", "BACON_BLOODGEMBUFFHEALTHVALUE",
+        "BACON_BLOODGEMBUFFATKVALUE", "BACON_BLOODGEMBUFFHEALTHVALUE", "BACON_FREE_REFRESH_COUNT",
         "TAVERN_SPELL_ATTACK_INCREASE", "TAVERN_SPELL_HEALTH_INCREASE",
     ];
 
@@ -166,6 +175,7 @@ public sealed class PowerLogParser
     private readonly object _lock = new();
     private readonly Dictionary<int, Entity> _entities = new();
     private readonly HashSet<(int Entity, int Tribe)> _races = new();
+    private IReadOnlyList<int> _availableRaces = Array.Empty<int>();
     private string     _gameType = "";
     private bool       _gameOver;
     private string?    _myName;
@@ -259,6 +269,17 @@ public sealed class PowerLogParser
         }
     }
 
+    /// <summary>The client-side list of lobby races, when gsunity can read it.</summary>
+    public void SetAvailableRaces(IReadOnlyList<int> races)
+    {
+        int[] valid = races.Where(Tribes.All.Contains).Distinct().ToArray();
+        if (valid.Length != races.Count || valid.Length < 5) valid = Array.Empty<int>();
+        lock (_lock)
+        {
+            if (!_availableRaces.SequenceEqual(valid)) _availableRaces = valid;
+        }
+    }
+
     /// <summary>Games that have finished since the last call.</summary>
     public IReadOnlyList<GameOutcome> TakeOutcomes()
     {
@@ -275,6 +296,7 @@ public sealed class PowerLogParser
     {
         _entities.Clear();
         _races.Clear();
+        _availableRaces = Array.Empty<int>();
         _gameType = "";
         _gameOver = false;
         _myName = null;
@@ -886,9 +908,8 @@ public sealed class PowerLogParser
     }
 
     /// <summary>
-    /// A lobby has five tribes. Off-lobby minions do show up (tokens, effects
-    /// that summon from outside the pool), but a handful at most, so the
-    /// fifth tribe has to clearly outnumber the sixth to be believed.
+    /// The client publishes all five races at the start. Counting minions is
+    /// only a fallback for a log running without the memory-reading module.
     /// </summary>
     private (List<(int Tribe, int Seen)> Counts, List<int> Tribes, bool Confident) Races()
     {
@@ -897,6 +918,10 @@ public sealed class PowerLogParser
             .Select(g => (Tribe: g.Key, Seen: g.Count()))
             .OrderByDescending(t => t.Seen)
             .ToList();
+        if (_availableRaces.Count > 0) return (counts, _availableRaces.ToList(), true);
+
+        // Off-lobby minions show up as tokens and summons, so the fifth race
+        // has to clearly outnumber the sixth before this guess is trusted.
         bool confident = counts.Count >= 5 && counts[4].Seen >= 6
                       && (counts.Count == 5 || counts[4].Seen >= 2 * counts[5].Seen);
         return (counts, counts.Take(5).Select(t => t.Tribe).ToList(), confident);
@@ -993,10 +1018,12 @@ public sealed class PowerLogParser
     /// <summary>The local player's global bonuses, using the same tags as the game.</summary>
     private IReadOnlyList<BattlegroundsBuff> Buffs()
     {
-        var buffs = new List<BattlegroundsBuff>(4);
+        var buffs = new List<BattlegroundsBuff>(8);
         if (_me == 0) return buffs;
 
         int undeadAttack = 0, undeadHealth = 0, beetleAttack = 0, beetleHealth = 0;
+        int volumizerAttack = 0, volumizerHealth = 0, goldNextTurn = 0, freeRerolls = 0;
+        var nomi = new Dictionary<string, (int Attack, int Health)>();
         foreach (Entity e in _entities.Values)
         {
             if (e.Controller != _me) continue;
@@ -1010,6 +1037,23 @@ public sealed class PowerLogParser
                 beetleAttack = Math.Max(beetleAttack, e.Tag("TAG_SCRIPT_DATA_NUM_1"));
                 beetleHealth = Math.Max(beetleHealth, e.Tag("TAG_SCRIPT_DATA_NUM_2"));
             }
+            else if (e.CardId is "BGS_104pe" or "BG34_855pe" or "BG30_MagicItem_544pe")
+            {
+                var old = nomi.GetValueOrDefault(e.CardId);
+                nomi[e.CardId] = (Math.Max(old.Attack, e.Tag("TAG_SCRIPT_DATA_NUM_1")),
+                    Math.Max(old.Health, e.Tag("TAG_SCRIPT_DATA_NUM_2")));
+            }
+            else if (e.CardId == "BG34_170e")
+            {
+                volumizerAttack = Math.Max(volumizerAttack, e.Tag("TAG_SCRIPT_DATA_NUM_1"));
+                volumizerHealth = Math.Max(volumizerHealth, e.Tag("TAG_SCRIPT_DATA_NUM_2"));
+            }
+            else if (e.Zone == "PLAY" && e.CardId == "BG26_135e")
+                goldNextTurn += e.Tag("TAG_SCRIPT_DATA_NUM_1");
+            else if (e.Zone == "PLAY" && e.CardId == "BG28_513e")
+                goldNextTurn -= e.Tag("TAG_SCRIPT_DATA_NUM_1");
+            else if (e.Zone == "PLAY" && e.CardId == "Bacon_Free_Refresh_Player_Ench")
+                freeRerolls = Math.Max(freeRerolls, e.Tag("BACON_FREE_REFRESH_COUNT"));
         }
         if (undeadAttack > 0 || undeadHealth > 0)
             buffs.Add(new BattlegroundsBuff(BattlegroundsBuffKind.Undead, undeadAttack, undeadHealth));
@@ -1033,6 +1077,16 @@ public sealed class PowerLogParser
             if (gemAttack > 0 || gemHealth > 0)
                 buffs.Add(new BattlegroundsBuff(BattlegroundsBuffKind.BloodGems, 1 + gemAttack, 1 + gemHealth));
         }
+
+        int nomiAttack = nomi.Values.Sum(n => n.Attack), nomiHealth = nomi.Values.Sum(n => n.Health);
+        if (nomiAttack > 0 || nomiHealth > 0)
+            buffs.Add(new BattlegroundsBuff(BattlegroundsBuffKind.Nomi, nomiAttack, nomiHealth));
+        if (volumizerAttack > 0 || volumizerHealth > 0)
+            buffs.Add(new BattlegroundsBuff(BattlegroundsBuffKind.Volumizers, volumizerAttack, volumizerHealth));
+        if (goldNextTurn != 0)
+            buffs.Add(new BattlegroundsBuff(BattlegroundsBuffKind.GoldNextTurn, goldNextTurn, 0));
+        if (freeRerolls > 0)
+            buffs.Add(new BattlegroundsBuff(BattlegroundsBuffKind.FreeRerolls, freeRerolls, 0));
         return buffs;
     }
 
