@@ -25,6 +25,7 @@
          physical pixels; a DPI-virtualized window would land scaled and
          offset. -->
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- The overlay copies its pixels straight into a DIB section. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>

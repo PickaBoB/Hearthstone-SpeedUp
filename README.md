@@ -16,25 +16,24 @@
 
 ## Скачать и запустить
 
-1. Скачайте [HearthstoneSpeedUp-v1.0.10.zip](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/download/v1.0.10/HearthstoneSpeedUp-v1.0.10.zip)
+1. Скачайте [HearthstoneSpeedUp-v1.0.11.zip](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/download/v1.0.11/HearthstoneSpeedUp-v1.0.11.zip)
    или откройте [последний релиз](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/latest).
 2. Распакуйте архив в отдельную папку. Оставьте вместе
    `HearthstoneSpeedUp.exe`, `gsunity64.dll` и папку `sim\` — она нужна для
    точного расчёта боёв.
 3. Запустите `HearthstoneSpeedUp.exe` — до игры или после, неважно.
-   .NET и Node.js устанавливать не нужно, всё уже внутри. Если игра уже
-   была открыта при первом запуске программы, перезапустите её: оверлею
-   нужен `Power.log`, а игра включает его запись только при запуске.
+   Windows сразу запросит права администратора: они нужны для внедрения модуля
+   и автореконнекта. .NET и Node.js устанавливать не нужно, всё уже внутри.
+   Если игра уже была открыта при первом запуске программы, перезапустите её:
+   оверлею нужен `Power.log`, а игра включает его запись только при запуске.
 4. Дождитесь надписи «Подключено» и выберите скорость. Скорость можно
    переключать и прямо в игре: кнопки **x1 · x2 · x3 · x8** в правом нижнем
    углу (отключаются во вкладке «Поля сражений»).
 
 Кнопка **↻** справа от скоростей — **автореконнект для пропуска боя**. Она
 сбрасывает только соединение с сервером текущего матча и восстанавливает его
-через 1 секунду, не затрагивая Battle.net. Для этой кнопки программу нужно
-запустить от администратора: Windows не даёт обычному пользователю менять
-правила брандмауэра и сбрасывать TCP-соединения. Во время ожидания на кнопке
-видно `…`, при ошибке — красный `!`; подробность появится в статусе программы.
+через 1 секунду, не затрагивая Battle.net. Во время ожидания на кнопке видно
+`…`, при ошибке — красный `!`; подробность появится в статусе программы.
 Пока поддерживается IPv4-подключение к игровому серверу.
 
 Горячие клавиши (работают прямо из игры, переназначаются в окне — нажмите
@@ -199,11 +198,12 @@ The Battlegrounds overlay also provides:
 Download the zip from
 [Releases](https://github.com/PickaBoB/Hearthstone-SpeedUp/releases/latest),
 unzip, and keep `HearthstoneSpeedUp.exe`, `gsunity64.dll` and the `sim` folder
-together. Run the exe; it finds and attaches to Hearthstone by itself. Neither
-.NET nor Node.js needs to be installed. The **↻** button next to the in-game
-speed presets resets only the current game server's connection and restores it
-after one second, leaving Battle.net untouched. This button requires running
-the program as administrator and currently supports IPv4 game servers.
+together. Run the exe and approve the UAC prompt; the program always requests
+administrator rights for injection and reconnect. It finds and attaches to
+Hearthstone by itself. Neither .NET nor Node.js needs to be installed. The **↻**
+button next to the in-game speed presets resets only the current game server's
+connection and restores it after one second, leaving Battle.net untouched.
+IPv4 game servers are currently supported.
 
 It injects a small module that sets the multiplier of the game's own
 `TimeScaleMgr` through the embedded Mono runtime, only while the client is
