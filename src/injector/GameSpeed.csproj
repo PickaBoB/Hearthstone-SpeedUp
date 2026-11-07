@@ -36,6 +36,12 @@
     <EmbeddedResource Include="..\bgoverlay\TribeIcons\*.jpg"
                       Link="TribeIcons\%(Filename)%(Extension)"
                       LogicalName="GameSpeed.TribeIcons.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\bgoverlay\BattlegroundsIcons\*.png"
+                      Link="BattlegroundsIcons\%(Filename)%(Extension)"
+                      LogicalName="GameSpeed.BattlegroundsIcons.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\bgoverlay\BattlegroundsIcons\Minion\*.png"
+                      Link="BattlegroundsIcons\Minion\%(Filename)%(Extension)"
+                      LogicalName="GameSpeed.BattlegroundsIcons.Minion.%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

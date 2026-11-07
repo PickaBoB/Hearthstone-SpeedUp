@@ -9,11 +9,11 @@ internal sealed class Settings
     public int     MmrPercentile  { get; set; } = 100;
     public bool    OverlayEnabled { get; set; } = true;
     /// <summary>Badge row heights, as a share of the game window's height.</summary>
-    public double  HeroBadgeY     { get; set; } = 0.20;
-    public double  TrinketBadgeY  { get; set; } = 0.20;
-    /// <summary>Height of the hovered-board strip over the play area.</summary>
+    public double  HeroBadgeY     { get; set; } = 0.22;
+    public double  TrinketBadgeY  { get; set; } = 0.22;
+    /// <summary>Top of the hovered-board panel, as a share of the game height.</summary>
     [JsonPropertyName("BannerY")]
-    public double  BoardY         { get; set; } = 0.018;
+    public double  BoardY         { get; set; } = 0.0;
     public bool    PanelEnabled   { get; set; } = true;
 
     /// <summary>
@@ -30,7 +30,7 @@ internal sealed class Settings
     /// <summary>How tall the whole strip is: the step follows from how many
     /// portraits the mode puts in it — eight in solo, four teams in duos.</summary>
     public double  PeekSpan       { get; set; } = 0.700;
-    public double  PanelY         { get; set; } = 0.12;
+    public double  PanelY         { get; set; } = 0.152;
     /// <summary>The turn counter in the top right corner of the play area.</summary>
     public bool    TurnEnabled    { get; set; } = true;
     public double  TurnY          { get; set; } = 0.015;
@@ -60,7 +60,14 @@ internal sealed class Settings
         try
         {
             if (File.Exists(FilePath))
-                return JsonSerializer.Deserialize<Settings>(File.ReadAllText(FilePath)) ?? new Settings();
+            {
+                var settings = JsonSerializer.Deserialize<Settings>(File.ReadAllText(FilePath)) ?? new Settings();
+                if (settings.BoardY == 0.018) settings.BoardY = 0.0;
+                if (settings.PanelY == 0.12) settings.PanelY = 0.152;
+                if (settings.HeroBadgeY == 0.20) settings.HeroBadgeY = 0.22;
+                if (settings.TrinketBadgeY == 0.20) settings.TrinketBadgeY = 0.22;
+                return settings;
+            }
         }
         catch { /* a broken file just means defaults */ }
         return new Settings();

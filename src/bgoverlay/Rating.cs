@@ -1,4 +1,4 @@
-﻿using System.Text.RegularExpressions;
+using System.Text.RegularExpressions;
 
 namespace BgOverlay;
 
@@ -79,12 +79,8 @@ internal static class Rating
         {
             if (!byId.TryGetValue(NormalizeHero(o.CardId), out var h) || Score(h) is not double score)
                 return NoData(o);
-            // Duo teams finish 1st to 4th, so the top half is the top two.
-            int half = game.IsDuo ? 2 : 4;
-            var places = h.PlacementDistribution.Where(p => double.IsFinite(p.Percentage)).ToList();
-            double top1 = places.Where(p => p.Rank == 1).Sum(p => p.Percentage);
-            double topHalf = places.Where(p => p.Rank <= half).Sum(p => p.Percentage);
-            string detail = $"топ-{half} {topHalf:0}% · 1-е {top1:0}%";
+            double? pick = h.TotalOffered > 0 ? (double)h.TotalPicked / h.TotalOffered : null;
+            string detail = pick is double pr && double.IsFinite(pr) ? $"{pr * 100:0.0}%" : "";
             string? hint = string.Join(", ", BestTribes(h).Take(2).Select(t => Tribes.Name(t.Tribe)));
             return new RatedOption(o, cuts(score), score, detail, hint.Length > 0 ? "любит: " + hint : null);
         }).ToList();
@@ -141,7 +137,7 @@ internal static class Rating
             if (!byId.TryGetValue(o.CardId, out var t) || Score(t) is not double score)
                 return NoData(o);
             double? pick = t.PickRateAtMmr.FirstOrDefault(p => p.Mmr == bucket)?.PickRate ?? t.PickRate;
-            string detail = pick is double pr && double.IsFinite(pr) ? $"берут в {pr * 100:0}%" : "";
+            string detail = pick is double pr && double.IsFinite(pr) ? $"{pr * 100:0.0}%" : "";
             return new RatedOption(o, cuts(score), score, detail, null);
         }).ToList();
     }

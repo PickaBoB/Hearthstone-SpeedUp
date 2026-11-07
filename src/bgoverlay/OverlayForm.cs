@@ -23,10 +23,10 @@ public sealed record BoardCard(string CardId, string Name, string Stats, string 
 
 /// <summary>One board under the pointer, laid out the way the game lays it.</summary>
 public sealed record PeekBoard(string HeroCard, Color Ink,
-    IReadOnlyList<BoardCard> Board, int Tier, IReadOnlyList<TavernTier> Tavern);
+    IReadOnlyList<BoardCard> Board, int Tier, IReadOnlyList<TavernTier> Tavern, int LastTurn = 0);
 
 /// <summary>The boards and tavern progress to show over the play area.</summary>
-public sealed record BoardPeek(IReadOnlyList<PeekBoard> Boards);
+public sealed record BoardPeek(IReadOnlyList<PeekBoard> Boards, int CurrentTurn = 0);
 
 /// <summary>Badges over a pending choice and/or the side panel.</summary>
 public sealed record OverlayModel(
@@ -148,10 +148,6 @@ internal sealed class OverlayForm : Form
         int n = model.Items.Count;
         double rowY = model.Kind == ChoiceKind.Hero ? Settings.Current.HeroBadgeY : Settings.Current.TrinketBadgeY;
         float top = (float)(rowY * h);
-
-        using var headerFont = new Font("Segoe UI", 0.0125f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        DrawChip(g, model.Header, headerFont, Color.FromArgb(236, 14, 15, 22), Color.Gainsboro,
-            w / 2, top - 0.024f * h, h);
 
         for (int i = 0; i < n; i++)
         {
@@ -298,40 +294,54 @@ internal sealed class OverlayForm : Form
         }
         else
         {
+            float u = w / 240f;
+            float heroW = w * 1.7f / 3.7f, placeW = w / 3.7f;
+            float placeX = x + heroW, mmrX = placeX + placeW;
             using var labels = new SolidBrush(Muted);
-            g.DrawString("Герой", smallFont, labels, new RectangleF(x + 0.007f * h, cy, w * 0.48f, gameHeadH), left);
-            g.DrawString("Место", smallFont, labels, new RectangleF(x + w * 0.52f, cy, w * 0.22f, gameHeadH), center);
-            g.DrawString("MMR", smallFont, labels, new RectangleF(x + w * 0.74f, cy, w * 0.24f, gameHeadH), center);
+            g.DrawString("Герой", smallFont, labels, new RectangleF(x + 8 * u, cy, heroW - 8 * u, gameHeadH), left);
+            g.DrawString("Место", smallFont, labels, new RectangleF(placeX, cy, placeW, gameHeadH), center);
+            g.DrawString("MMR", smallFont, labels, new RectangleF(mmrX, cy, placeW, gameHeadH), center);
             cy += gameHeadH;
 
             foreach (HistoryRow game in panel.Games)
             {
-                using (var rowBg = new SolidBrush(Color.FromArgb(90, 0, 0, 0)))
-                    g.FillRectangle(rowBg, x, cy, w, gameH);
+                var row = new RectangleF(x, cy, w, gameH);
+                using (var rowBg = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
+                    g.FillRectangle(rowBg, row);
                 Image? tile = art?.Tile(game.HeroCard);
                 if (tile is not null)
                 {
-                    var row = new Rectangle((int)x, (int)cy, (int)w, (int)gameH);
-                    float srcX = tile.Width * (34f / 256f);
-                    float srcW = tile.Width - srcX;
-                    float srcH = Math.Min(tile.Height, srcW * gameH / w);
+                    float imageX = x - 35 * u, imageW = 145 * u;
+                    float srcX = tile.Width * (34f / 256f), srcW = tile.Width - srcX;
+                    float srcH = Math.Min(tile.Height, srcW * 34f / 145f);
                     float srcY = (tile.Height - srcH) / 2;
+                    const int slices = 24;
+                    Region oldClip = g.Clip;
+                    g.SetClip(row, CombineMode.Replace);
                     using var attributes = new ImageAttributes();
-                    attributes.SetColorMatrix(new ColorMatrix { Matrix33 = 0.45f });
-                    g.DrawImage(tile, row, srcX, srcY, srcW, srcH, GraphicsUnit.Pixel, attributes);
-                    using var shade = new LinearGradientBrush(row,
-                        Color.FromArgb(35, 0, 0, 0), Color.FromArgb(115, 0, 0, 0), 0f);
-                    g.FillRectangle(shade, row);
+                    for (int i = 0; i < slices; i++)
+                    {
+                        float alpha = 170f / 255f * (1f - (i + 0.5f) / slices);
+                        attributes.SetColorMatrix(new ColorMatrix { Matrix33 = alpha });
+                        g.DrawImage(tile,
+                            Rectangle.Round(new RectangleF(imageX + i * imageW / slices, cy,
+                                imageW / slices + 0.5f, gameH)),
+                            srcX + i * srcW / slices, srcY, srcW / slices, srcH, GraphicsUnit.Pixel, attributes);
+                    }
+                    g.Clip = oldClip;
                 }
                 using var heroInk = new SolidBrush(Ink);
                 using var placeInk = new SolidBrush(game.PlaceInk);
                 using var deltaInk = new SolidBrush(game.DeltaInk);
                 g.DrawString(game.Hero, gameFont, heroInk,
-                    new RectangleF(x + 0.007f * h, cy, w * 0.48f, gameH), left);
+                    new RectangleF(x + 8 * u, cy, heroW - 8 * u, gameH), left);
                 g.DrawString(game.Place, gameBold, placeInk,
-                    new RectangleF(x + w * 0.52f, cy, w * 0.22f, gameH), center);
+                    new RectangleF(placeX, cy, placeW, gameH), center);
                 g.DrawString(game.Delta, gameBold, deltaInk,
-                    new RectangleF(x + w * 0.74f, cy, w * 0.24f, gameH), center);
+                    new RectangleF(mmrX, cy, placeW, gameH), center);
+                if (game.Place is "1" or "1-е" && art?.Icon("bgs-crown") is { } crown)
+                    g.DrawImage(crown, new RectangleF(placeX + (placeW - 22 * u) / 2 - 8 * u,
+                        cy + (gameH - 18 * u) / 2 - 7 * u, 16 * u, 16 * u));
                 cy += gameH;
             }
         }
@@ -507,97 +517,154 @@ internal sealed class OverlayForm : Form
         (float)(Settings.Current.PeekSpan * h / Math.Max(slots, 1));
 
     /// <summary>
-    /// The hovered player's compact strip: hero, minions in the same row,
-    /// then a divider and all six tavern tiers. No player or board text.
+    /// The hovered player's last seen board and tavern upgrades, using Deck
+    /// Tracker's panel geometry, colours and original game interface images.
     /// </summary>
     private static void DrawPeek(Graphics g, BoardPeek peek, CardArt? art, Size size, float h)
     {
-        float pad = 0.006f * h, content = 0.052f * h;
-        float portrait = 0.046f * h, oval = 0.044f * h, gap = 0.005f * h;
-        float tierCell = 0.041f * h, rowH = 2 * pad + content;
+        float boardW = 0.685f * h, tiersW = 0.231f * h, panelH = 0.139f * h;
+        float cardH = panelH, cardW = cardH * 300f / 350f, cardStep = 0.0926f * h;
+        float captionH = 0.025f * h;
         float y = (float)(Settings.Current.BoardY * h);
 
+        using var captionFont = new Font("Segoe UI", 0.0148f * h, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var center = new StringFormat(StringFormat.GenericTypographic)
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap,
+            Trimming = StringTrimming.EllipsisCharacter,
+        };
+        using var left = new StringFormat(StringFormat.GenericTypographic)
+        {
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap,
+        };
+
         SmoothingMode was = g.SmoothingMode;
+        InterpolationMode interpolation = g.InterpolationMode;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
 
         foreach (PeekBoard board in peek.Boards)
         {
-            int count = board.Board.Count;
-            float cardsWidth = count * oval + Math.Max(0, count - 1) * gap;
-            float width = 2 * pad + portrait + (count > 0 ? gap + cardsWidth : 0)
-                        + 0.014f * h + 6 * tierCell;
-            width = Math.Min(width, size.Width - 0.020f * h);
+            float width = Math.Min(boardW + tiersW, size.Width - 0.020f * h);
             float x = (size.Width - width) / 2;
-            using (GraphicsPath frame = Pill(new RectangleF(x, y, width, rowH), 0.005f * h))
+            var frame = new RectangleF(x, y, width, panelH);
+            using (var fill = new LinearGradientBrush(frame,
+                       Color.FromArgb(229, 32, 36, 39), Color.FromArgb(229, 35, 39, 42), 90f))
+                g.FillRectangle(fill, frame);
+            using (var rim = new Pen(Color.FromArgb(229, 64, 67, 69), Math.Max(1f, 0.0010f * h)))
             {
-                using var fill = new SolidBrush(Back);
-                using var rim = new Pen(Frame, Math.Max(1f, 0.0012f * h));
-                g.FillPath(fill, frame);
-                g.DrawPath(rim, frame);
+                g.DrawRectangle(rim, frame.X, frame.Y, frame.Width, frame.Height);
+                g.DrawLine(rim, x + boardW, y, x + boardW, y + panelH);
             }
 
-            float py = y + pad + (content - portrait) / 2;
-            DrawFace(g, board.HeroCard, art, new RectangleF(x + pad, py, portrait, portrait), board.Ink, h);
-
-            float bx = x + pad + portrait + (count > 0 ? gap : 0);
-            float by = y + pad + (content - oval * 1.12f) / 2;
+            int count = board.Board.Count;
+            float cardsWidth = count > 0 ? cardW + (count - 1) * cardStep : 0;
+            float bx = x + (boardW - cardsWidth) / 2, by = y;
             foreach (BoardCard card in board.Board)
             {
-                DrawMinion(g, card, art, new RectangleF(bx, by, oval, oval * 1.12f), h);
-                bx += oval + gap;
+                DrawMinion(g, card, art, new RectangleF(bx, by, cardW, cardH), h);
+                bx += cardStep;
             }
 
-            float split = bx + 0.006f * h;
-            using (var divider = new Pen(Edge, Math.Max(1f, 0.0012f * h)))
-                g.DrawLine(divider, split, y + pad + 0.005f * h,
-                    split, y + pad + content - 0.005f * h);
+            if (count == 0)
+            {
+                using var emptyInk = new SolidBrush(Ink);
+                g.DrawString("Доска ещё не была видна", captionFont, emptyInk,
+                    new RectangleF(x, y, boardW, panelH), center);
+            }
+            else
+            {
+                int ago = Math.Max(0, peek.CurrentTurn - board.LastTurn);
+                string caption = ago == 0 ? "Текущая доска" : $"{ago} {TurnWord(ago)} назад";
+                using var captionInk = new SolidBrush(Ink);
+                g.DrawString(caption, captionFont, captionInk,
+                    new RectangleF(x, y + panelH + 0.0046f * h, boardW, captionH), left);
+            }
 
-            float tiersX = split + 0.008f * h;
+            float cellW = 0.0694f * h, cellH = 0.0556f * h;
+            float tiersX = x + boardW + 0.006f * h, tiersY = y + 0.0093f * h;
             for (int level = 1; level <= 6; level++)
             {
                 TavernTier? reached = board.Tavern.FirstOrDefault(t => t.Level == level);
-                bool unlocked = level <= board.Tier || reached is not null;
-                DrawTavernTier(g, level, unlocked, reached?.Turn ?? 0,
-                    new RectangleF(tiersX + (level - 1) * tierCell, y + pad, tierCell, content), h);
+                int column = (level - 1) % 3, row = (level - 1) / 3;
+                DrawTavernTier(g, art, level, reached?.Turn ?? 0, reached?.Triples ?? 0,
+                    new RectangleF(tiersX + column * cellW, tiersY + row * (cellH + 0.0046f * h),
+                        cellW - 0.0046f * h, cellH), h);
             }
-            y += rowH + 0.006f * h;
+            y += panelH + captionH + 0.006f * h;
         }
 
+        g.InterpolationMode = interpolation;
         g.SmoothingMode = was;
     }
 
-    /// <summary>A tavern shield, grey until reached, with its upgrade turn.</summary>
-    private static void DrawTavernTier(Graphics g, int level, bool unlocked, int turn, RectangleF cell, float h)
+    private static string TurnWord(int turn)
     {
-        float w = 0.030f * h, sh = 0.036f * h;
-        float x = cell.X + (cell.Width - w) / 2, y = cell.Y + 0.001f * h;
-        PointF[] points =
+        int lastTwo = turn % 100, last = turn % 10;
+        if (lastTwo is >= 11 and <= 14 || last == 0 || last >= 5) return "ходов";
+        return last == 1 ? "ход" : "хода";
+    }
+
+    /// <summary>One Deck Tracker tavern cell: game shield, triples and upgrade turn.</summary>
+    private static void DrawTavernTier(Graphics g, CardArt? art, int level, int turn, int triples,
+        RectangleF cell, float h)
+    {
+        using (GraphicsPath background = Pill(cell, 0.0028f * h))
+        using (var fill = new SolidBrush(turn > 0 ? Color.FromArgb(55, 57, 60) : Color.FromArgb(40, 43, 46)))
+            g.FillPath(fill, background);
+
+        float tierX = cell.X + 0.0028f * h + (turn > 0 ? 0 : 0.0111f * h);
+        float tierY = cell.Y + (turn > 0 ? 0.0056f : 0.0102f) * h;
+        Image? tier = art?.Icon($"tier-{level}");
+        if (tier is not null)
         {
-            new(x, y), new(x + w, y), new(x + w, y + sh * 0.56f),
-            new(x + w * 0.50f, y + sh), new(x, y + sh * 0.56f),
-        };
-        using (var shield = new GraphicsPath())
+            var box = new RectangleF(tierX, tierY, 0.0222f * h, 0.0222f * h);
+            if (turn > 0) g.DrawImage(tier, box);
+            else
+            {
+                using var attributes = new ImageAttributes();
+                attributes.SetColorMatrix(new ColorMatrix { Matrix33 = 0.5f });
+                g.DrawImage(tier, new Rectangle((int)box.X, (int)box.Y, (int)box.Width, (int)box.Height),
+                    0, 0, tier.Width, tier.Height, GraphicsUnit.Pixel, attributes);
+            }
+        }
+        if (turn <= 0) return;
+
+        Image? triple = art?.Icon("triple");
+        if (triple is not null)
         {
-            shield.AddPolygon(points);
-            using var fill = new SolidBrush(unlocked ? Color.FromArgb(112, 79, 39) : Color.FromArgb(39, 42, 50));
-            using var rim = new Pen(unlocked ? Color.FromArgb(224, 178, 91) : Color.FromArgb(82, 87, 98),
-                Math.Max(1f, 0.0012f * h));
-            g.FillPath(fill, shield);
-            g.DrawPath(rim, shield);
+            var box = new RectangleF(cell.X + 0.0287f * h, cell.Y + 0.0056f * h,
+                0.0315f * h, 0.0315f * h);
+            g.DrawImage(triple, box);
+            if (triples == 0)
+            {
+                Image? shade = art?.Icon("triple-black");
+                if (shade is not null)
+                {
+                    using var attributes = new ImageAttributes();
+                    attributes.SetColorMatrix(new ColorMatrix { Matrix33 = 0.2f });
+                    g.DrawImage(shade, new Rectangle((int)box.X, (int)box.Y, (int)box.Width, (int)box.Height),
+                        0, 0, shade.Width, shade.Height, GraphicsUnit.Pixel, attributes);
+                }
+            }
         }
 
-        using var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-        using var tierFont = new Font("Segoe UI", 0.0150f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var tierInk = new SolidBrush(unlocked ? Ink : Dim);
-        g.DrawString(level.ToString(), tierFont, tierInk, new RectangleF(x, y, w, sh * 0.76f), center);
-
-        if (!unlocked) return;
-        using var turnFont = new Font("Segoe UI", 0.0095f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var turnInk = new SolidBrush(Color.FromArgb(237, 196, 105));
-        using var right = new StringFormat(StringFormat.GenericTypographic)
-            { Alignment = StringAlignment.Far, FormatFlags = StringFormatFlags.NoWrap };
-        g.DrawString(turn > 0 ? $"↗{turn}" : "↗?", turnFont, turnInk,
-            new RectangleF(cell.X, cell.Y + 0.038f * h, cell.Width - 0.003f * h, 0.014f * h), right);
+        using var qtyFont = new Font("Segoe UI", 0.0139f * h, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var turnFont = new Font("Segoe UI", 0.0093f * h, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var ink = new SolidBrush(Color.White);
+        using var center = new StringFormat(StringFormat.GenericTypographic)
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap,
+        };
+        g.DrawString(triples.ToString(), qtyFont, ink,
+            new RectangleF(cell.X + 0.0370f * h, cell.Y + 0.0083f * h, 0.0185f * h, 0.0222f * h), center);
+        g.DrawString($"{turn} {TurnWord(turn)}", turnFont, ink,
+            new RectangleF(cell.X, cell.Y + 0.0390f * h, cell.Width, 0.0140f * h), center);
     }
 
     /// <summary>A round portrait of whatever card the id names.</summary>
@@ -652,77 +719,81 @@ internal sealed class OverlayForm : Form
         return path;
     }
 
-    /// <summary>One minion: its portrait, with attack and health on the corners.</summary>
+    /// <summary>One minion with the game's own frame, stat plate and keyword overlays.</summary>
     private static void DrawMinion(Graphics g, BoardCard card, CardArt? art, RectangleF box, float h)
     {
         SmoothingMode was = g.SmoothingMode;
+        InterpolationMode interpolation = g.InterpolationMode;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        float sx = box.Width / 300f, sy = box.Height / 350f;
 
-        var face = new RectangleF(box.X, box.Y, box.Width, box.Width * 1.08f);
-        using (var shade = new SolidBrush(Color.FromArgb(120, 0, 0, 0)))
-            g.FillEllipse(shade, face.X - 0.0022f * h, face.Y + 0.0022f * h,
-                face.Width + 0.0044f * h, face.Height + 0.0044f * h);
+        void Layer(string name)
+        {
+            Image? image = art?.Icon(name);
+            if (image is not null) g.DrawImage(image, box);
+        }
 
+        if (card.Marks.Contains("провок")) Layer("Minion/taunt");
+
+        // Deck Tracker's 300x350 frame wraps a 256x256 canvas at (-24,-36).
+        // The portrait is the ellipse centred at 128,128 with radii 87,120.
+        var face = new RectangleF(box.X + 65f * sx, box.Y + 44f * sy, 174f * sx, 240f * sy);
+        var canvas = new RectangleF(box.X + 24f * sx, box.Y + 36f * sy, 256f * sx, 256f * sy);
         Image? square = art?.Art(card.CardId);
         Image? pic = square ?? art?.Tile(card.CardId);
         using (var path = new GraphicsPath())
         {
             path.AddEllipse(face);
             Region old = g.Clip;
-            InterpolationMode smooth = g.InterpolationMode;
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             g.SetClip(path, CombineMode.Replace);
             if (pic is not null)
             {
-                // The square art has the card's whole picture with a blank
-                // margin each side; the minion itself sits a little above
-                // the middle. The tile, when that is all there is, is a wide
-                // crop whose middle holds the same thing.
                 RectangleF src = square is not null
                     ? new RectangleF(pic.Width * 0.148f, pic.Height * 0.078f,
                                      pic.Width * 0.703f, pic.Height * 0.703f)
                     : new RectangleF(pic.Width * 0.52f - pic.Height / 2f, 0, pic.Height, pic.Height);
-                g.DrawImage(pic, face, src, GraphicsUnit.Pixel);
+                g.DrawImage(pic, canvas, src, GraphicsUnit.Pixel);
             }
             else
             {
-                using var empty = new SolidBrush(Color.FromArgb(32, 34, 46));
-                g.FillRectangle(empty, face);
+                using var empty = new SolidBrush(Color.FromArgb(32, 34, 36));
+                g.FillEllipse(empty, face);
             }
-            g.InterpolationMode = smooth;
             g.Clip = old;
         }
 
-        Color ring = card.Marks.Contains("щит") ? Color.FromArgb(255, 214, 120)
-                   : card.Marks.Contains("провок") ? Color.FromArgb(150, 158, 178)
-                   : Color.FromArgb(120, 98, 62);
-        using (var pen = new Pen(ring, Math.Max(1.5f, card.Marks.Contains("провок") ? 0.0040f * h : 0.0022f * h)))
-            g.DrawEllipse(pen, face);
-        if (card.Marks.Contains("яд"))
-            using (var poison = new SolidBrush(Color.FromArgb(120, 230, 130)))
-                g.FillEllipse(poison, face.Right - 0.016f * h, face.Y + 0.002f * h, 0.013f * h, 0.013f * h);
+        if (art?.Icon("Minion/border") is { } border) g.DrawImage(border, box);
+        else
+        {
+            using var fallback = new Pen(Color.FromArgb(122, 119, 112), Math.Max(1.5f, 0.0022f * h));
+            g.DrawEllipse(fallback, face);
+        }
+        if (card.Marks.Contains("возр")) Layer("Minion/reborn");
+        if (card.Marks.Contains("яд")) Layer("Minion/poisonous");
+        Layer("Minion/stats");
+        if (card.Marks.Contains("щит") && art?.Icon("Minion/divine-shield") is { } shield)
+            g.DrawImage(shield, new RectangleF(box.X - 12f * sx, box.Y + 12f * sy, 325f * sx, 311f * sy));
 
-        // Attack and health, bare on the portrait the way the board shows
-        // them: an outline keeps them readable over whatever art is under.
         string[] parts = card.Stats.Split('/');
         string atkText = parts[0];
         string hpText = parts.Length > 1 ? parts[1] : "";
         float digits = Math.Max(atkText.Length, hpText.Length);
-        float size = (digits >= 5 ? 0.0100f * h : digits >= 4 ? 0.0118f * h
-                   : digits >= 3 ? 0.0145f * h : 0.0170f * h)
-                   * Math.Min(1f, box.Width / (0.054f * h));
+        float size = digits >= 5 ? 0.0100f * h : digits >= 4 ? 0.0118f * h
+                   : digits >= 3 ? 0.0145f * h : 0.0170f * h;
         using var numFont = new Font("Segoe UI", size, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var left = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Near };
-        using var rightEdge = new StringFormat(StringFormat.GenericTypographic) { Alignment = StringAlignment.Far };
+        using var center = new StringFormat(StringFormat.GenericTypographic)
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap,
+        };
+        var atkBox = new RectangleF(box.X + 53f * sx, box.Y + 206f * sy, 75f * sx, 75f * sy);
+        var hpBox = new RectangleF(box.X + 175f * sx, box.Y + 206f * sy, 75f * sx, 75f * sy);
+        Outlined(g, atkText, numFont, Good, atkBox, center, h);
+        Outlined(g, hpText, numFont, Good, hpBox, center, h);
 
-        float line = size * 1.35f, numY = face.Bottom - line * 0.78f;
-        // Kept within the portrait: at four digits a number that hangs out
-        // would run into the minion beside it.
-        var atkBox = new RectangleF(face.X - 0.002f * h, numY, box.Width * 0.58f, line);
-        var hpBox = new RectangleF(face.Right - box.Width * 0.58f + 0.002f * h, numY, box.Width * 0.58f, line);
-        Outlined(g, atkText, numFont, Color.FromArgb(118, 226, 118), atkBox, left, h);
-        Outlined(g, hpText, numFont, Color.FromArgb(240, 84, 72), hpBox, rightEdge, h);
-
+        g.InterpolationMode = interpolation;
         g.SmoothingMode = was;
     }
 
@@ -923,118 +994,69 @@ internal sealed class OverlayForm : Form
         : place <= 1 ? Color.FromArgb(255, 196, 0) : place <= 2 ? Color.FromArgb(120, 220, 110)
                      : place <= 4 ? Color.FromArgb(200, 210, 110) : Color.FromArgb(230, 90, 80);
 
-    /// <summary>The caption over a row of badges: as small as it reads.</summary>
-    private static void DrawChip(Graphics g, string text, Font font, Color bg, Color fg, float cx, float y, float h)
-    {
-        if (string.IsNullOrEmpty(text)) return;
-        using var tight = new StringFormat(StringFormat.GenericTypographic);
-        SizeF sz = g.MeasureString(text, font, int.MaxValue, tight);
-        float padX = 0.007f * h, padY = 0.0035f * h;
-        var r = new RectangleF(cx - sz.Width / 2 - padX, y, sz.Width + 2 * padX, sz.Height + 2 * padY);
-
-        SmoothingMode was = g.SmoothingMode;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        using (GraphicsPath pill = Pill(r, 0.005f * h))
-        {
-            using var fill = new SolidBrush(bg);
-            using var rim = new Pen(Frame, Math.Max(1f, 0.0011f * h));
-            g.FillPath(fill, pill);
-            g.DrawPath(rim, pill);
-        }
-        g.SmoothingMode = was;
-
-        using var ink = new SolidBrush(fg);
-        g.DrawString(text, font, ink, r.X + padX, r.Y + padY, tight);
-    }
-
-    /// <summary>
-    /// One option's rank: the tier letter, the place that option finishes at
-    /// on average and what that number is made of. Kept small — the game
-    /// shows the lobby's tribes right above this row.
-    /// </summary>
+    /// <summary>One option in Deck Tracker's choice layout: tier above two stat columns.</summary>
     private static void DrawBadge(Graphics g, RatedOption o, float cx, float top, float h)
     {
-        bool hinted = o.TribeHint is { Length: > 0 };
-        float bw = 0.178f * h, bh = hinted ? 0.056f * h : 0.042f * h, tw = 0.040f * h;
-        var box = new RectangleF(cx - bw / 2, top, bw, bh);
+        float bw = 0.200f * h, bh = 0.040f * h, tw = 0.047f * h, th = 0.039f * h;
+        float gap = Math.Max(1f, 0.0015f * h);
+        float columnW = (bw - gap) / 2;
+        float statsY = top + 0.039f * h;
+        var tierBox = new RectangleF(cx - tw / 2, top, tw, th);
+        var placeBox = new RectangleF(cx - bw / 2, statsY, columnW, bh);
+        var pickBox = new RectangleF(placeBox.Right + gap, statsY, columnW, bh);
         Color tier = TierColor(o.Tier);
-        float radius = 0.006f * h;
 
-        SmoothingMode was = g.SmoothingMode;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        using (GraphicsPath pill = Pill(box, radius))
-        {
-            using var bg = new SolidBrush(Back);
-            g.FillPath(bg, pill);
-            // The tier block takes the rounding of the side it sits on.
-            Region old = g.Clip;
-            g.SetClip(new RectangleF(box.X, box.Y, tw, bh), CombineMode.Intersect);
-            using (var tierBg = new SolidBrush(tier))
-            using (GraphicsPath left = Pill(new RectangleF(box.X, box.Y, tw + 2 * radius, bh), radius))
-                g.FillPath(tierBg, left);
-            g.Clip = old;
-            using var border = new Pen(Color.FromArgb(215, tier), Math.Max(1f, 0.0016f * h));
-            g.DrawPath(border, pill);
-        }
-        g.SmoothingMode = was;
+        using (var tierBg = new SolidBrush(tier)) g.FillRectangle(tierBg, tierBox);
 
-        using var tierFont = new Font("Segoe UI", 0.029f * h, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var tierFont = new Font("Segoe UI", 0.028f * h, FontStyle.Bold, GraphicsUnit.Pixel);
         using var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-        g.DrawString(o.Tier, tierFont, Brushes.Black, new RectangleF(box.X, box.Y, tw, bh), center);
+        var tierLabel = new RectangleF(tierBox.X, tierBox.Y, tierBox.Width, statsY - top);
+        g.DrawString(o.Tier, tierFont, Brushes.Black, tierLabel, center);
 
         using var tight = new StringFormat(StringFormat.GenericTypographic)
             { FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.EllipsisCharacter };
-        using var big = new Font("Segoe UI", 0.0195f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var unitFont = new Font("Segoe UI", 0.0108f * h, FontStyle.Regular, GraphicsUnit.Pixel);
-        using var small = new Font("Segoe UI", 0.0112f * h, FontStyle.Regular, GraphicsUnit.Pixel);
-        using var inkBig = new SolidBrush(Ink);
-        using var inkSmall = new SolidBrush(Muted);
+        using var labelFont = new Font("Segoe UI", 0.0120f * h, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var valueFont = new Font("Segoe UI", 0.0190f * h, FontStyle.Bold, GraphicsUnit.Pixel);
+        using var labels = new SolidBrush(Muted);
+        using var placeInk = new SolidBrush(Color.FromArgb(104, 196, 113));
+        using var pickInk = new SolidBrush(Ink);
+        using var bg = new SolidBrush(Back);
+        float pad = 0.005f * h, labelH = 0.014f * h, valueY = statsY + 0.016f * h;
 
-        float x = box.X + tw + 0.007f * h, inner = bw - tw - 0.012f * h, y = box.Y + 0.0045f * h;
-        if (o.AvgPlace is double p)
+        void Column(RectangleF box, string label, string value, Brush valueBrush)
         {
-            string place = $"{p:0.00}";
-            SizeF num = g.MeasureString(place, big, int.MaxValue, tight);
-            g.DrawString(place, big, inkBig, new RectangleF(x, y, inner, 0.021f * h), tight);
-            using var unitInk = new SolidBrush(Dim);
-            g.DrawString("место", unitFont, unitInk,
-                new RectangleF(x + num.Width + 0.003f * h, y + 0.0085f * h, inner, 0.014f * h), tight);
-        }
-        else
-        {
-            using var noneFont = new Font("Segoe UI", 0.0150f * h, FontStyle.Bold, GraphicsUnit.Pixel);
-            g.DrawString("нет данных", noneFont, inkSmall,
-                new RectangleF(x, y + 0.002f * h, inner, 0.019f * h), tight);
+            SizeF valueSize = g.MeasureString(value, valueFont, int.MaxValue, tight);
+            float valueW = Math.Min(box.Width, valueSize.Width + 2 * pad);
+            g.FillRectangle(bg, box.X, box.Y, box.Width, valueY - box.Y);
+            g.FillRectangle(bg, box.X, valueY, valueW, box.Bottom - valueY);
+
+            var labelRect = new RectangleF(box.X + pad, box.Y + 0.002f * h, box.Width - 2 * pad, labelH);
+            var valueRect = new RectangleF(box.X + pad, valueY, box.Width - 2 * pad, 0.027f * h);
+            g.DrawString(label, labelFont, labels, labelRect, tight);
+            g.DrawString(value, valueFont, valueBrush, valueRect, tight);
         }
 
-        y += 0.0215f * h;
-        g.DrawString(o.Detail, small, inkSmall, new RectangleF(x, y, inner, 0.014f * h), tight);
-        if (hinted)
-        {
-            using var hintFont = new Font("Segoe UI", 0.0106f * h, FontStyle.Regular, GraphicsUnit.Pixel);
-            using var hintBrush = new SolidBrush(Color.FromArgb(150, 220, 140));
-            g.DrawString(o.TribeHint!, hintFont, hintBrush,
-                new RectangleF(x, y + 0.0140f * h, inner, 0.014f * h), tight);
-        }
+        Column(placeBox, "Avg Placement", o.AvgPlace is double p ? $"{p:0.00}" : "—", placeInk);
+        Column(pickBox, "Частота выбора", o.Detail.Length > 0 ? o.Detail : "—", pickInk);
     }
 
     /// <summary>Made-up state for the layout preview and for rendering a shot.</summary>
     internal static OverlayModel Sample(ChoiceKind kind)
     {
-        string[] tiers = { "A", "B", "C", "E" };
-        int n = kind == ChoiceKind.Hero ? 4 : 3;
+        string[] tiers = { "A", "A", "B", "S" };
+        int n = 4;
         var items = Enumerable.Range(0, n).Select(i => new RatedOption(
-            new ChoiceOption(i, "", $"Пример {i + 1}"), tiers[i], 3.6 + 0.3 * i,
-            kind == ChoiceKind.Hero ? "топ-4 55% · 1-е 15%" : "берут в 20%",
+            new ChoiceOption(i, "", $"Пример {i + 1}"), tiers[i], 4.01 + 0.12 * i,
+            $"{16.1 + 11.4 * i:0.0}%",
             kind == ChoiceKind.Hero ? "любит: Звери, Драконы" : null)).ToList();
         var games = new[]
         {
-            new HistoryRow("4", Bad, "TB_BaconShop_HERO_28", "Дорнозму Освобожденный", "", "16:08", "-24", Bad, "", []),
-            new HistoryRow("1", Good, "BG31_HERO_005", "Воевода Саурфанг", "", "16:02", "+82", Good, "", []),
-            new HistoryRow("4", Bad, "TB_BaconShop_HERO_28", "Пирамидон", "", "15:54", "+0", Muted, "", []),
+            new HistoryRow("4-е", Bad, "TB_BaconShop_HERO_28", "Дорнозму Освобожденный", "", "16:08", "-24", Bad, "", []),
+            new HistoryRow("1-е", Good, "BG31_HERO_005", "Воевода Саурфанг", "", "16:02", "+82", Good, "", []),
+            new HistoryRow("4-е", Bad, "TB_BaconShop_HERO_28", "Пирамидон", "", "15:54", "+0", Muted, "", []),
         };
         var panel = new LobbyPanel(
-            [15, 24, 20, 14, 18], [11, 17, 43, 92, 126, 23], 6082, 6082, games);
+            [15, 24, 20, 14, 18], [], 6082, 6082, games);
         return new OverlayModel(kind, items, "Пример расположения — подгоните высоту в окне", panel,
             Turn: "Ход 8", Buffs:
             [
@@ -1097,18 +1119,18 @@ internal sealed class OverlayForm : Form
         var peek = new BoardPeek(
         [
             new PeekBoard("TB_BaconShop_HERO_28", Ink, cards, 6,
-                [new(1, 1), new(2, 2), new(3, 4), new(4, 6), new(5, 9), new(6, 11)]),
+                [new(1, 1, 0), new(2, 2, 0), new(3, 4, 1), new(4, 6, 2), new(5, 9, 1), new(6, 11, 3)], 7),
             new PeekBoard("BG31_HERO_005", Ink, cards.Take(5).ToList(), 5,
-                [new(1, 1), new(2, 2), new(3, 4), new(4, 7), new(5, 10)]),
-        ]);
+                [new(1, 1, 0), new(2, 2, 1), new(3, 4, 1), new(4, 7, 2), new(5, 10, 1)], 6),
+        ], 8);
         return new OverlayModel(null, [], "", Peek: peek);
     }
 
     public static Color TierColor(string tier) => tier switch
     {
-        "S" => Color.FromArgb(255, 196, 0),
-        "A" => Color.FromArgb(76, 217, 100),
-        "B" => Color.FromArgb(170, 220, 80),
+        "S" => Color.FromArgb(52, 152, 203),
+        "A" => Color.FromArgb(70, 156, 82),
+        "B" => Color.FromArgb(91, 166, 77),
         "C" => Color.FromArgb(240, 205, 70),
         "D" => Color.FromArgb(240, 140, 50),
         "E" => Color.FromArgb(230, 70, 60),

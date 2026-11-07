@@ -436,7 +436,7 @@ internal sealed class BattlegroundsPanel : UserControl
           .Append(_art.Version).Append('|').Append(_peekSlot).Append('|')
           .Append(string.Join(",", (s.Seen ?? []).Select(b => $"{b.PlayerId}:{b.Turn}:{b.Stats}"))).Append('|')
           .Append(string.Join(",", (s.Lobby ?? []).Select(p =>
-              $"{p.PlayerName}:{p.Tier}:{string.Join(".", (p.Tavern ?? []).Select(t => $"{t.Level}={t.Turn}"))}"))).Append('|')
+              $"{p.PlayerName}:{p.Tier}:{string.Join(".", (p.Tavern ?? []).Select(t => $"{t.Level}={t.Turn}={t.Triples}"))}"))).Append('|')
           .Append(s.IsDuo).Append('|').Append(s.TribesConfident).Append('|')
           .Append(string.Join(",", s.Tribes)).Append('|');
         sb.Append(s.InBattlegrounds).Append('|').Append(s.MyHeroCardId).Append(s.MyHeroName).Append('|')
@@ -516,10 +516,6 @@ internal sealed class BattlegroundsPanel : UserControl
             ? snap.Tribes
             : session.FirstOrDefault()?.Tribes ?? new List<int>();
         var available = tribes.OrderBy(Tribes.ShortName).ToList();
-        bool tribesKnown = snap.InBattlegrounds ? snap.TribesConfident : available.Count == 5;
-        var banned = tribesKnown
-            ? Tribes.All.Except(available).OrderBy(Tribes.ShortName).ToList()
-            : new List<int>();
         var games = session.Take(8).Select(SessionGameRow).ToList();
         var modeGames = session.Where(g => g.IsDuo == duo).ToList();
         int start = duo ? _ratingStartDuo : _ratingStartSolo;
@@ -531,7 +527,7 @@ internal sealed class BattlegroundsPanel : UserControl
         }
         if (start == 0) start = current;
         if (current == 0) current = start;
-        return new LobbyPanel(available, banned, start, current, games);
+        return new LobbyPanel(available, Array.Empty<int>(), start, current, games);
     }
 
     // A session's worth of games; the strip is narrow enough to carry them.
@@ -557,9 +553,10 @@ internal sealed class BattlegroundsPanel : UserControl
                         Marks(m), MarkInk(m))).ToList()
                     : Array.Empty<BoardCard>(),
                 p.Tier,
-                p.Tavern ?? Array.Empty<TavernTier>()))
+                p.Tavern ?? Array.Empty<TavernTier>(),
+                p.Board?.Turn ?? 0))
             .ToList();
-        return boards.Count == 0 ? null : new BoardPeek(boards);
+        return boards.Count == 0 ? null : new BoardPeek(boards, snap.Turn);
     }
 
     private static string Marks(SeenMinion m)
@@ -611,7 +608,7 @@ internal sealed class BattlegroundsPanel : UserControl
     }
 
     private static HistoryRow SessionGameRow(GameResult g) => new(
-        g.Place.ToString(),
+        $"{g.Place}-е",
         OverlayForm.PlaceColor(g.Place, g.IsDuo),
         g.HeroCardId,
         g.HeroName,

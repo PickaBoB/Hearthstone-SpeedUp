@@ -46,8 +46,8 @@ public sealed record GameOutcome(
     public int BoardStats => Board.Sum(m => m.Attack + Math.Max(0, m.Health));
 }
 
-/// <summary>A tavern tier and the shop turn on which the player reached it.</summary>
-public sealed record TavernTier(int Level, int Turn);
+/// <summary>A tavern tier, its upgrade turn and triples made at that tier.</summary>
+public sealed record TavernTier(int Level, int Turn, int Triples = 0);
 
 /// <summary>
 /// A player in the lobby, in the order the game's leaderboard puts them:
@@ -143,7 +143,7 @@ public sealed class PowerLogParser
         "MEGA_WINDFURY", "CANT_ATTACK",
         "TAG_SCRIPT_DATA_NUM_1", "TAG_SCRIPT_DATA_NUM_2", "TAG_SCRIPT_DATA_NUM_3", "TAG_SCRIPT_DATA_NUM_4",
         "TAG_SCRIPT_DATA_NUM_5", "TAG_SCRIPT_DATA_NUM_6", "ATTACHED", "CREATOR", "PLAYER_TECH_LEVEL",
-        "PLAYER_LEADERBOARD_PLACE",
+        "PLAYER_LEADERBOARD_PLACE", "PLAYER_TRIPLES",
         "EXHAUSTED", "BACON_DUO_TEAMMATE_PLAYER_ID", "COPIED_FROM_ENTITY_ID",
         "BACON_BLOODGEMBUFFATKVALUE", "BACON_BLOODGEMBUFFHEALTHVALUE", "BACON_FREE_REFRESH_COUNT",
         "TAVERN_SPELL_ATTACK_INCREASE", "TAVERN_SPELL_HEALTH_INCREASE",
@@ -219,6 +219,8 @@ public sealed class PowerLogParser
     private readonly Dictionary<int, int> _places = new();
     // The first shop turn on which each player's tavern tier was observed.
     private readonly Dictionary<int, Dictionary<int, int>> _tierTurns = new();
+    // PLAYER_TRIPLES is cumulative; the panel needs the count made at each tier.
+    private readonly Dictionary<int, Dictionary<int, int>> _triples = new();
     // Names in DebugPrintGame metadata: the local player and, in duos, their
     // teammate. The other opponents come from the client's shared player info.
     private readonly Dictionary<int, string> _names = new();
@@ -321,6 +323,7 @@ public sealed class PowerLogParser
         _seen.Clear();
         _places.Clear();
         _tierTurns.Clear();
+        _triples.Clear();
         _names.Clear();
         _screenPlaces.Clear();
         _seenThisFight.Clear();
@@ -638,7 +641,12 @@ public sealed class PowerLogParser
                     (e.Tags ??= new())[tag] = n;
                 break;
         }
-        if (tag is "PLAYER_ID" or "PLAYER_TECH_LEVEL") TrackTier(e);
+        if (tag is "PLAYER_ID" or "PLAYER_TECH_LEVEL")
+        {
+            TrackTier(e);
+            TrackTriples(e);
+        }
+        else if (tag == "PLAYER_TRIPLES") TrackTriples(e);
     }
 
     private void TrackTier(Entity e)
@@ -649,6 +657,17 @@ public sealed class PowerLogParser
             ? known
             : _tierTurns[e.PlayerId] = new Dictionary<int, int>();
         if (!turns.ContainsKey(level)) turns[level] = Math.Max(1, (_rawTurn + 1) / 2);
+    }
+
+    private void TrackTriples(Entity e)
+    {
+        int level = e.Tag("PLAYER_TECH_LEVEL");
+        if (e.PlayerId == 0 || level is < 1 or > 6) return;
+        var byTier = _triples.TryGetValue(e.PlayerId, out var known)
+            ? known
+            : _triples[e.PlayerId] = new Dictionary<int, int>();
+        int earlier = byTier.Where(t => t.Key < level).Sum(t => t.Value);
+        byTier[level] = Math.Max(0, e.Tag("PLAYER_TRIPLES") - earlier);
     }
 
     private void OpenCombat()
@@ -962,8 +981,11 @@ public sealed class PowerLogParser
             // is today's, not the one from the fight we last saw.
             int tier = hero.Tag("PLAYER_TECH_LEVEL");
             int currentTier = tier > 0 ? tier : board?.TechLevel ?? 0;
+            _triples.TryGetValue(pid, out var triples);
             var tavern = _tierTurns.TryGetValue(pid, out var turns)
-                ? turns.Select(t => new TavernTier(t.Key, t.Value)).OrderBy(t => t.Level).ToList()
+                ? turns.Select(t => new TavernTier(t.Key, t.Value,
+                    triples is not null && triples.TryGetValue(t.Key, out int qty) ? qty : 0))
+                  .OrderBy(t => t.Level).ToList()
                 : new List<TavernTier>();
             lobby.Add(new LobbyPlayer(
                 _screenPlaces.TryGetValue(pid, out int shown) ? shown
